@@ -1,0 +1,47 @@
+# Build outputs
+build/
+bin/
+obj/
+dist/
+out/
+cmake-build-*/
+*.obj
+*.o
+*.pch
+*.pdb
+*.ilk
+*.idb
+*.tlog
+*.lastbuildstate
+*.exe
+*.dll
+*.lib
+*.exp
+
+# Local tools and IDE settings
+.vs/
+.vscode/
+.idea/
+.dotnet/
+.nuget/
+CMakeUserPresets.json
+*.user
+*.suo
+*.VC.db
+*.log
+*.tmp
+
+# User projects, recordings, and rendered audio
+*.tracktionedit
+*.wav
+*.mp3
+*.flac
+*.aif
+*.aiff
+*.ogg
+*.mid
+*.midi
+
+# Operating-system files
+.DS_Store
+Thumbs.db
