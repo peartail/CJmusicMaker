@@ -5,7 +5,9 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cmath>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <vector>
@@ -14,22 +16,101 @@ namespace
 {
 namespace te = tracktion::engine;
 
+void routeTrackToAudioOutput (te::AudioTrack& track)
+{
+    track.getOutput().setOutputToDefaultDevice (false);
+}
+
 constexpr double timelineLengthSeconds = 16.0;
-constexpr std::array<int, 13> midiNotes { 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72 };
+constexpr int keyboardOctaves = 3;
+constexpr auto midiNotes = []
+{
+    std::array<int, keyboardOctaves * 12> notes {};
+    for (size_t index = 0; index < notes.size(); ++index)
+        notes[index] = 60 + static_cast<int> (index);
+    return notes;
+}();
 constexpr std::array<char, 13> keyChars { 'A', 'W', 'S', 'E', 'D', 'F', 'T', 'G', 'Y', 'H', 'U', 'J', 'K' };
-constexpr std::array<const char*, 13> noteNames {
-    "C4", "C#4/Db4", "D4", "D#4/Eb4", "E4", "F4", "F#4/Gb4",
-    "G4", "G#4/Ab4", "A4", "A#4/Bb4", "B4", "C5"
-};
-constexpr std::array<int, 8> whiteNoteIndices { 0, 2, 4, 5, 7, 9, 11, 12 };
-constexpr std::array<int, 5> blackNoteIndices { 1, 3, 6, 8, 10 };
-constexpr std::array<int, 5> blackKeySlots { 0, 1, 3, 4, 5 };
+constexpr std::array<int, 7> whiteSemitones { 0, 2, 4, 5, 7, 9, 11 };
+constexpr std::array<int, 5> blackSemitones { 1, 3, 6, 8, 10 };
+constexpr std::array<int, 5> blackSlots { 0, 1, 3, 4, 5 };
+constexpr auto whiteNoteIndices = []
+{
+    std::array<int, keyboardOctaves * whiteSemitones.size()> indices {};
+    for (int octave = 0; octave < keyboardOctaves; ++octave)
+        for (size_t note = 0; note < whiteSemitones.size(); ++note)
+            indices[static_cast<size_t> (octave) * whiteSemitones.size() + note] = octave * 12 + whiteSemitones[note];
+    return indices;
+}();
+constexpr auto blackNoteIndices = []
+{
+    std::array<int, keyboardOctaves * blackSemitones.size()> indices {};
+    for (int octave = 0; octave < keyboardOctaves; ++octave)
+        for (size_t note = 0; note < blackSemitones.size(); ++note)
+            indices[static_cast<size_t> (octave) * blackSemitones.size() + note] = octave * 12 + blackSemitones[note];
+    return indices;
+}();
+constexpr auto blackKeySlots = []
+{
+    std::array<int, keyboardOctaves * blackSlots.size()> slots {};
+    for (int octave = 0; octave < keyboardOctaves; ++octave)
+        for (size_t note = 0; note < blackSlots.size(); ++note)
+            slots[static_cast<size_t> (octave) * blackSlots.size() + note] = octave * 7 + blackSlots[note];
+    return slots;
+}();
 constexpr std::array<const char*, 12> rootNames {
     "C", "C#/Db", "D", "D#/Eb", "E", "F", "F#/Gb", "G", "G#/Ab", "A", "A#/Bb", "B"
 };
 constexpr std::array<const char*, 2> scaleNames { "Major", "Natural Minor" };
 const juce::Identifier scaleRootProperty { "musicBitMakerScaleRoot" };
 const juce::Identifier scaleTypeProperty { "musicBitMakerScaleType" };
+const juce::Identifier octaveProperty { "musicBitMakerKeyboardOctave" };
+constexpr int minimumOctave = 0, maximumOctave = 6;
+
+juce::String instrumentStateForLog (const te::AudioTrack& track)
+{
+    const auto synths = track.pluginList.getPluginsOfType<te::FourOscPlugin>();
+    juce::String result = "track=" + track.itemID.toString()
+                        + " fourOscCount=" + juce::String (synths.size())
+                        + " output=" + track.getOutput().getOutputName()
+                        + " defaultAudioOut=" + juce::String (track.getOutput().usesDefaultAudioOut() ? 1 : 0);
+    if (synths.isEmpty())
+        return result;
+
+    const auto& synth = *synths.getFirst();
+    const auto property = [&synth] (const char* name)
+    {
+        return synth.state.getProperty (juce::Identifier (name), "<default>").toString();
+    };
+    return result + " plugin=" + synth.itemID.toString()
+           + " preset=" + property ("musicBitMakerPreset")
+           + " drum=" + property ("musicBitMakerDrumIndex")
+           + " wave1=" + property ("waveShape1")
+           + " wave2=" + property ("waveShape2")
+           + " attack=" + property ("ampAttack")
+           + " release=" + property ("ampRelease")
+           + " filterFreq=" + property ("filterFreq")
+           + " distortionOn=" + property ("distortionOn")
+           + " delayOn=" + property ("delayOn")
+           + " chorusOn=" + property ("chorusOn")
+           + " reverbOn=" + property ("reverbOn");
+}
+
+int keyboardPitch (size_t index, int octave)
+{
+    return midiNotes[index] + 12 * (juce::jlimit (minimumOctave, maximumOctave, octave) - 4);
+}
+
+juce::String pitchLabel (int pitch)
+{
+    return juce::String (rootNames[static_cast<size_t> (pitch % 12)]) + juce::String (pitch / 12 - 1);
+}
+
+juce::String compactPitchLabel (int pitch)
+{
+    return juce::String (rootNames[static_cast<size_t> (pitch % 12)])
+        .upToFirstOccurrenceOf ("/", false, false) + juce::String (pitch / 12 - 1);
+}
 const juce::Identifier trackHeightProperty { "musicBitMakerTrackHeight" };
 constexpr auto lastNewProjectDirectoryKey = "lastNewProjectDirectory";
 
@@ -156,18 +237,144 @@ bool configureDrumSynth (te::FourOscPlugin& synth, int drumIndex)
     return true;
 }
 
+class DiagnosticAudioTap final : public te::Plugin
+{
+public:
+    static constexpr auto xmlTypeName = "musicBitMakerDiagnosticAudioTap";
+    static constexpr std::uint32_t windowFrames = 4096;
+
+    struct Window
+    {
+        std::uint32_t capture = 0, sequence = 0, frames = 0, samples = 0, nonZero = 0;
+        std::uint64_t hash = 0;
+        double sumSquares = 0.0;
+        float peak = 0.0f;
+    };
+
+    explicit DiagnosticAudioTap (te::PluginCreationInfo info) : Plugin (info) {}
+
+    juce::String getName() const override { return "MusicBitMaker Diagnostic Audio Tap"; }
+    juce::String getPluginType() override { return xmlTypeName; }
+    juce::String getSelectableDescription() override { return getName(); }
+    bool shouldMeasureCpuUsage() const noexcept override { return false; }
+    void initialise (const te::PluginInitialisationInfo&) override {}
+    void deinitialise() override {}
+
+    void armCapture (std::uint32_t capture) noexcept
+    {
+        requestedCapture.store (capture, std::memory_order_release);
+    }
+
+    bool popWindow (Window& result) noexcept
+    {
+        const auto read = readIndex.load (std::memory_order_relaxed);
+        if (read == writeIndex.load (std::memory_order_acquire))
+            return false;
+        result = windows[read % windows.size()];
+        readIndex.store (read + 1, std::memory_order_release);
+        return true;
+    }
+
+    std::uint32_t takeDroppedCount() noexcept
+    {
+        return droppedWindows.exchange (0, std::memory_order_relaxed);
+    }
+
+    void applyToBuffer (const te::PluginRenderContext& context) override
+    {
+        const auto requested = requestedCapture.load (std::memory_order_acquire);
+        if (requested != lastSeenCapture)
+        {
+            lastSeenCapture = activeCapture = requested;
+            sequence = 0;
+            resetWindow();
+        }
+        if (activeCapture == 0 || context.destBuffer == nullptr)
+            return;
+
+        const auto channels = juce::jmin (2, context.destBuffer->getNumChannels());
+        if (channels == 0)
+            return;
+
+        for (int frame = 0; frame < context.bufferNumSamples; ++frame)
+        {
+            for (int channel = 0; channel < channels; ++channel)
+            {
+                const auto sample = context.destBuffer->getReadPointer (channel)
+                    [context.bufferStartSample + frame];
+                hash ^= std::bit_cast<std::uint32_t> (sample);
+                hash *= 1099511628211ULL;
+                const auto magnitude = std::abs (sample);
+                peak = juce::jmax (peak, magnitude);
+                sumSquares += static_cast<double> (sample) * sample;
+                nonZero += magnitude > 0.000001f ? 1u : 0u;
+                ++samples;
+            }
+            if (++frames == windowFrames)
+            {
+                publishWindow();
+                if (activeCapture == 0)
+                    break;
+            }
+        }
+    }
+
+private:
+    void resetWindow() noexcept
+    {
+        frames = samples = nonZero = 0;
+        hash = 14695981039346656037ULL;
+        sumSquares = 0.0;
+        peak = 0.0f;
+    }
+
+    void publishWindow() noexcept
+    {
+        const auto write = writeIndex.load (std::memory_order_relaxed);
+        if (write - readIndex.load (std::memory_order_acquire) < windows.size())
+        {
+            windows[write % windows.size()] = { activeCapture, sequence, frames, samples,
+                                                   nonZero, hash, sumSquares, peak };
+            writeIndex.store (write + 1, std::memory_order_release);
+        }
+        else
+        {
+            droppedWindows.fetch_add (1, std::memory_order_relaxed);
+        }
+        if (++sequence == 24)
+            activeCapture = 0;
+        resetWindow();
+    }
+
+    std::array<Window, 128> windows {};
+    std::atomic<std::uint32_t> requestedCapture { 0 }, readIndex { 0 }, writeIndex { 0 }, droppedWindows { 0 };
+    std::uint32_t lastSeenCapture = 0, activeCapture = 0, sequence = 0;
+    std::uint32_t frames = 0, samples = 0, nonZero = 0;
+    std::uint64_t hash = 14695981039346656037ULL;
+    double sumSquares = 0.0;
+    float peak = 0.0f;
+};
+
 class KeyboardPadComponent final : public juce::Component
 {
 public:
     KeyboardPadComponent (std::function<void (size_t, bool)> noteChangedToUse,
                           std::function<bool (size_t)> noteIsDownToUse,
-                          std::function<void (int, int)> scaleChangedToUse)
+                          std::function<void (int, int)> scaleChangedToUse,
+                          std::function<void (int)> octaveChangedToUse)
         : noteChanged (std::move (noteChangedToUse)),
           noteIsDown (std::move (noteIsDownToUse)),
-          scaleChanged (std::move (scaleChangedToUse))
+          scaleChanged (std::move (scaleChangedToUse)),
+          octaveChanged (std::move (octaveChangedToUse))
     {
         setWantsKeyboardFocus (true);
-        setSize (760, 250);
+        setSize (1160, 250);
+        for (int octave = minimumOctave; octave <= maximumOctave; ++octave)
+            octaveBox.addItem ("Octave: " + juce::String (octave), octave + 1);
+        octaveBox.setSelectedId (5, juce::dontSendNotification);
+        octaveBox.setTitle ("Keyboard octave");
+        octaveBox.onChange = [this] { changeOctave (octaveBox.getSelectedId() - 1); };
+        addAndMakeVisible (octaveBox);
 
         for (size_t i = 0; i < rootNames.size(); ++i)
             rootBox.addItem ("Root: " + juce::String (rootNames[i]), static_cast<int> (i + 1));
@@ -187,6 +394,8 @@ public:
         };
         addAndMakeVisible (rootBox);
         addAndMakeVisible (scaleBox);
+        for (auto* box : { &octaveBox, &rootBox, &scaleBox })
+            box->setWantsKeyboardFocus (false);
     }
 
     ~KeyboardPadComponent() override
@@ -212,8 +421,14 @@ public:
 
     void resized() override
     {
-        rootBox.setBounds (12, 10, 120, 30);
-        scaleBox.setBounds (140, 10, 160, 30);
+        octaveBox.setBounds (12, 10, 116, 30);
+        rootBox.setBounds (136, 10, 120, 30);
+        scaleBox.setBounds (264, 10, 160, 30);
+    }
+
+    void setOctave (int octave)
+    {
+        changeOctave (octave, false);
     }
 
     void paint (juce::Graphics& graphics) override
@@ -221,9 +436,9 @@ public:
         graphics.fillAll (juce::Colour::fromRGB (20, 23, 31));
         graphics.setColour (juce::Colour::fromRGB (190, 198, 214));
         graphics.setFont (juce::FontOptions (13.0f, juce::Font::bold));
-        graphics.drawText (isEnabled() ? "WHITE  A S D F G H J K   |   BLACK  W E T Y U"
+        graphics.drawText (isEnabled() ? "MOUSE: 3 OCTAVES  |  A-K: FIRST OCTAVE  |  Z/X: SHIFT"
                                        : "KEYBOARD DISABLED  |  Select a keyboard track",
-                           314, 10, getWidth() - 326, 30, juce::Justification::centredLeft);
+                           432, 10, getWidth() - 444, 30, juce::Justification::centredLeft);
 
         for (const auto index : whiteNoteIndices)
             drawKey (graphics, static_cast<size_t> (index), false);
@@ -234,6 +449,12 @@ public:
     bool keyPressed (const juce::KeyPress& key) override
     {
         const auto character = static_cast<char> (std::toupper (key.getTextCharacter()));
+        if (character == 'Z' || character == 'X')
+        {
+            if (! key.getModifiers().isAnyModifierKeyDown())
+                changeOctave (currentOctave + (character == 'Z' ? -1 : 1));
+            return true;
+        }
         for (size_t index = 0; index < keyChars.size(); ++index)
             if (character == keyChars[index])
             {
@@ -277,6 +498,22 @@ public:
     }
 
 private:
+    friend int runKeyboardOctaveTest();
+
+    void changeOctave (int octave, bool notify = true)
+    {
+        octave = juce::jlimit (minimumOctave, maximumOctave, octave);
+        if (octave != currentOctave)
+        {
+            releaseAll();
+            currentOctave = octave;
+            if (notify)
+                octaveChanged (octave);
+        }
+        octaveBox.setSelectedId (octave + 1, juce::dontSendNotification);
+        repaint();
+    }
+
     juce::Rectangle<int> getKeyArea() const
     {
         return getLocalBounds().withTrimmedTop (50).reduced (8, 4);
@@ -329,9 +566,11 @@ private:
         auto labels = key.toNearestInt();
         const auto noteLabel = labels.removeFromBottom (24);
         const auto shortcutLabel = labels.removeFromBottom (28);
-        graphics.drawText (juce::String::charToString (keyChars[index]), shortcutLabel, juce::Justification::centred);
-        graphics.setFont (juce::FontOptions (black ? 10.0f : 12.0f));
-        graphics.drawText (noteNames[index], noteLabel, juce::Justification::centred);
+        if (index < keyChars.size())
+            graphics.drawText (juce::String::charToString (keyChars[index]), shortcutLabel, juce::Justification::centred);
+        graphics.setFont (juce::FontOptions (black ? 9.0f : 11.0f));
+        graphics.drawText (compactPitchLabel (keyboardPitch (index, currentOctave)),
+                           noteLabel, juce::Justification::centred);
     }
 
     int noteAt (juce::Point<float> position) const
@@ -378,7 +617,9 @@ private:
     std::function<void (size_t, bool)> noteChanged;
     std::function<bool (size_t)> noteIsDown;
     std::function<void (int, int)> scaleChanged;
-    juce::ComboBox rootBox, scaleBox;
+    std::function<void (int)> octaveChanged;
+    juce::ComboBox octaveBox, rootBox, scaleBox;
+    int currentOctave = 4;
     std::array<bool, midiNotes.size()> keyboardDown {};
     std::array<bool, midiNotes.size()> sentDown {};
     int mouseNote = -1;
@@ -391,6 +632,7 @@ public:
     KeyboardPadWindow (std::function<void (size_t, bool)> noteChanged,
                        std::function<bool (size_t)> noteIsDown,
                        std::function<void (int, int)> scaleChanged,
+                       std::function<void (int)> octaveChanged,
                        std::function<void()> closedToUse)
         : DocumentWindow ("Keyboard Pad", juce::Colour::fromRGB (20, 23, 31),
                           minimiseButton | closeButton),
@@ -398,11 +640,11 @@ public:
     {
         setUsingNativeTitleBar (true);
         setResizable (true, false);
-        setResizeLimits (520, 220, 1100, 420);
+        setResizeLimits (900, 220, 1600, 420);
         pad = new KeyboardPadComponent (std::move (noteChanged), std::move (noteIsDown),
-                                        std::move (scaleChanged));
+                                        std::move (scaleChanged), std::move (octaveChanged));
         setContentOwned (pad, true);
-        centreWithSize (760, 280);
+        centreWithSize (1160, 280);
         setAlwaysOnTop (true);
         setVisible (true);
     }
@@ -418,6 +660,8 @@ public:
     {
         pad->repaint();
     }
+
+    void setOctave (int octave) { pad->setOctave (octave); }
 
     void setScale (int rootIndex, int scaleIndex)
     {
@@ -455,6 +699,12 @@ public:
         settingsOptions.folderName = "MusicBitMaker";
         settingsOptions.osxLibrarySubFolder = "Application Support";
         appProperties.setStorageParameters (settingsOptions);
+
+        instrumentLog.reset (juce::FileLogger::createDefaultAppLogger (
+            "MusicBitMaker", "instrument-diagnostic.log",
+            "MusicBitMaker instrument diagnostics " JUCE_APPLICATION_VERSION_STRING, 1024 * 1024));
+        logInstrumentEvent ("session executable="
+            + juce::File::getSpecialLocation (juce::File::currentExecutableFile).getFullPathName());
 
         initialiseEdit (true);
 
@@ -544,7 +794,7 @@ public:
             [this] (size_t index, bool down)
             {
                 keyboardNotesDown[index] = down;
-                updateCombinedLiveNote (index);
+                updateCombinedLiveNote (index, "keyboard-pad");
             },
             [this] (size_t index) { return isNoteVisuallyDown (index); },
             [this] (int rootIndex, int scaleIndex)
@@ -553,6 +803,11 @@ public:
                 edit->state.setProperty (scaleTypeProperty, scaleIndex, nullptr);
                 statusMessage = juce::String (rootNames[static_cast<size_t> (rootIndex)])
                               + " " + scaleNames[static_cast<size_t> (scaleIndex)];
+                repaint();
+            },
+            [this] (int octave)
+            {
+                edit->state.setProperty (octaveProperty, octave, nullptr);
                 repaint();
             },
             [this] { menuItemsChanged(); });
@@ -581,6 +836,7 @@ public:
         {
             menu.addItem (keyboardPadMenuId, "Keyboard Pad", true,
                           keyboardWindow != nullptr && keyboardWindow->isVisible());
+            menu.addItem (instrumentLogMenuId, "Show Instrument Diagnostic Log", instrumentLog != nullptr);
         }
         return menu;
     }
@@ -592,6 +848,8 @@ public:
         else if (menuItemId == saveAsMenuId) saveProjectAs();
         else if (menuItemId == loadMenuId) chooseProjectToLoad();
         else if (menuItemId == keyboardPadMenuId) toggleKeyboardWindow();
+        else if (menuItemId == instrumentLogMenuId && instrumentLog != nullptr)
+            instrumentLog->getLogFile().revealToUser();
     }
 
     ~MainComponent() override
@@ -674,7 +932,7 @@ public:
             if (character == keyChars[index])
             {
                 keyboardNotesDown[index] = true;
-                updateCombinedLiveNote (index);
+                updateCombinedLiveNote (index, "main-keyboard");
                 return true;
             }
         }
@@ -704,7 +962,7 @@ public:
         for (size_t index = 0; index < keyChars.size(); ++index)
         {
             keyboardNotesDown[index] = juce::KeyPress::isKeyCurrentlyDown (std::tolower (keyChars[index]));
-            updateCombinedLiveNote (index);
+            updateCombinedLiveNote (index, "main-key-state");
         }
         spaceWasDown = juce::KeyPress::isKeyCurrentlyDown (juce::KeyPress::spaceKey);
         repaint();
@@ -818,8 +1076,69 @@ private:
         saveMenuId,
         saveAsMenuId,
         loadMenuId,
-        keyboardPadMenuId
+        keyboardPadMenuId,
+        instrumentLogMenuId
     };
+
+    void logInstrumentEvent (const juce::String& event)
+    {
+        if (instrumentLog != nullptr)
+            instrumentLog->logMessage (juce::Time::getCurrentTime().toISO8601 (true) + " " + event);
+    }
+
+    void armAudioCapture (te::AudioTrack& track, const char* reason)
+    {
+        const auto capture = ++nextAudioCapture;
+        auto count = 0;
+        for (auto* tap : track.pluginList.getPluginsOfType<DiagnosticAudioTap>())
+        {
+            tap->armCapture (capture);
+            ++count;
+        }
+        for (auto* tap : edit->getMasterPluginList().getPluginsOfType<DiagnosticAudioTap>())
+        {
+            tap->armCapture (capture);
+            ++count;
+        }
+        logInstrumentEvent ("audio-capture-start id=" + juce::String (capture)
+                            + " reason=" + juce::String (reason)
+                            + " taps=" + juce::String (count)
+                            + " " + instrumentStateForLog (track));
+    }
+
+    void drainAudioCapture()
+    {
+        const auto drain = [this] (DiagnosticAudioTap& tap, const juce::String& trackID)
+        {
+            const auto stage = static_cast<int> (tap.state.getProperty ("musicBitMakerTapStage", -1));
+            const auto stageName = stage == 0 ? "post-synth" : stage == 1 ? "post-track" : "post-master";
+            DiagnosticAudioTap::Window window;
+            while (tap.popWindow (window))
+            {
+                const auto rms = window.samples > 0
+                    ? std::sqrt (window.sumSquares / window.samples) : 0.0;
+                logInstrumentEvent ("audio-window id=" + juce::String (window.capture)
+                    + " stage=" + stageName
+                    + " track=" + trackID
+                    + " tap=" + tap.itemID.toString()
+                    + " sequence=" + juce::String (window.sequence)
+                    + " frames=" + juce::String (window.frames)
+                    + " nonZero=" + juce::String (window.nonZero)
+                    + " rms=" + juce::String (rms, 8)
+                    + " peak=" + juce::String (window.peak, 8)
+                    + " hash=" + juce::String::toHexString (window.hash));
+            }
+            if (const auto dropped = tap.takeDroppedCount(); dropped > 0)
+                logInstrumentEvent ("audio-window-dropped track=" + trackID
+                                    + " stage=" + juce::String (stage)
+                                    + " count=" + juce::String (dropped));
+        };
+        for (auto* track : te::getAudioTracks (*edit))
+            for (auto* tap : track->pluginList.getPluginsOfType<DiagnosticAudioTap>())
+                drain (*tap, track->itemID.toString());
+        for (auto* tap : edit->getMasterPluginList().getPluginsOfType<DiagnosticAudioTap>())
+            drain (*tap, "master");
+    }
 
     static constexpr int contentLeft = 260;
     static constexpr int trackRowTop = 194;
@@ -897,6 +1216,55 @@ private:
         return synth;
     }
 
+    void ensureDiagnosticAudioTaps (te::AudioTrack& track)
+    {
+        auto* synth = findInstrument (track);
+        if (synth == nullptr)
+            return;
+
+        for (int stage = 0; stage < 2; ++stage)
+        {
+            bool found = false;
+            for (auto* tap : track.pluginList.getPluginsOfType<DiagnosticAudioTap>())
+                found = found || static_cast<int> (tap->state.getProperty ("musicBitMakerTapStage", -1)) == stage;
+            if (found)
+                continue;
+
+            auto plugin = edit->getPluginCache().createNewPlugin (DiagnosticAudioTap::xmlTypeName, {});
+            if (auto* tap = dynamic_cast<DiagnosticAudioTap*> (plugin.get()))
+            {
+                tap->state.setProperty ("musicBitMakerTapStage", stage, nullptr);
+                const auto index = stage == 0 ? track.pluginList.indexOf (synth) + 1
+                                              : track.pluginList.size();
+                track.pluginList.insertPlugin (plugin, index, nullptr);
+            }
+            else
+            {
+                logInstrumentEvent ("audio-tap-install-failed track=" + track.itemID.toString()
+                                    + " stage=" + juce::String (stage));
+            }
+        }
+    }
+
+    void ensureMasterDiagnosticAudioTap()
+    {
+        auto& plugins = edit->getMasterPluginList();
+        for (auto* tap : plugins.getPluginsOfType<DiagnosticAudioTap>())
+            if (static_cast<int> (tap->state.getProperty ("musicBitMakerTapStage", -1)) == 2)
+                return;
+
+        auto plugin = edit->getPluginCache().createNewPlugin (DiagnosticAudioTap::xmlTypeName, {});
+        if (auto* tap = dynamic_cast<DiagnosticAudioTap*> (plugin.get()))
+        {
+            tap->state.setProperty ("musicBitMakerTapStage", 2, nullptr);
+            plugins.insertPlugin (plugin, plugins.size(), nullptr);
+        }
+        else
+        {
+            logInstrumentEvent ("audio-tap-install-failed track=master stage=2");
+        }
+    }
+
     void ensureDrumTracks()
     {
         for (int drumIndex = 0; drumIndex < static_cast<int> (drumPresets.size()); ++drumIndex)
@@ -914,12 +1282,16 @@ private:
             auto* synth = dynamic_cast<te::FourOscPlugin*> (plugin.get());
             if (synth != nullptr && configureDrumSynth (*synth, drumIndex))
                 track->pluginList.insertPlugin (plugin, 0, nullptr);
-            track->getOutput().setOutputToDefaultDevice (true);
+            routeTrackToAudioOutput (*track);
         }
     }
 
     void initialiseEdit (bool addDefaultDrums = false)
     {
+        const auto storedOctave = static_cast<int> (edit->state.getProperty (octaveProperty, 4));
+        const auto usableOctave = juce::jlimit (minimumOctave, maximumOctave, storedOctave);
+        if (storedOctave != usableOctave)
+            edit->state.setProperty (octaveProperty, usableOctave, nullptr);
         if (addDefaultDrums)
         {
             edit->ensureNumberOfAudioTracks (1);
@@ -934,8 +1306,10 @@ private:
             createMidiClip (*track);
             if (drumIndexFor (*track) < 0)
                 ensureInstrument (*track, i % static_cast<int> (synthPresets.size()));
-            track->getOutput().setOutputToDefaultDevice (true);
+            ensureDiagnosticAudioTaps (*track);
+            routeTrackToAudioOutput (*track);
         }
+        ensureMasterDiagnosticAudioTap();
         selectedTrackIndex = tracks.isEmpty()
                            ? -1
                            : juce::jlimit (0, tracks.size() - 1, selectedTrackIndex);
@@ -984,7 +1358,8 @@ private:
             repaint();
             return;
         }
-        track->getOutput().setOutputToDefaultDevice (true);
+        ensureDiagnosticAudioTaps (*track);
+        routeTrackToAudioOutput (*track);
         edit->getTransport().ensureContextAllocated (true);
         selectedTrackIndex = -1;
         selectTrack (oldCount);
@@ -1108,6 +1483,11 @@ private:
 
         const auto oldChoice = currentInstrumentChoice (*track);
         const auto newChoice = showInstrumentDialog ("Change Instrument", oldChoice);
+        logInstrumentEvent ("instrument-selection old=" + juce::String (oldChoice)
+                            + " new=" + juce::String (newChoice)
+                            + " playing=" + juce::String (edit->getTransport().isPlaying() ? 1 : 0)
+                            + " position=" + juce::String (currentPosition(), 3)
+                            + " " + instrumentStateForLog (*track));
         if (newChoice < 0 || newChoice == oldChoice)
         {
             grabKeyboardFocus();
@@ -1121,18 +1501,21 @@ private:
                 "Changing between a synthesizer and a drum clears all notes on this track. Continue?",
                 "Change", "Cancel"))
         {
+            logInstrumentEvent ("instrument-change-cancelled track=" + track->itemID.toString());
             grabKeyboardFocus();
             return;
         }
 
         finishOpenNotes (currentPosition());
-        releaseAllLiveNotes();
+        releaseAllLiveNotes ("instrument-change");
         if (! configureTrackInstrument (*track, newChoice))
         {
+            logInstrumentEvent ("instrument-apply-failed " + instrumentStateForLog (*track));
             statusMessage = "Could not change instrument";
             repaint();
             return;
         }
+        ensureDiagnosticAudioTaps (*track);
 
         for (auto* clip : track->getClips())
             if (auto* midi = dynamic_cast<te::MidiClip*> (clip))
@@ -1155,6 +1538,11 @@ private:
         selectedNote = nullptr;
         midiClip = createMidiClip (*track);
         edit->getTransport().ensureContextAllocated (true);
+        armAudioCapture (*track, "instrument-change");
+        logInstrumentEvent ("instrument-applied choice=" + juce::String (newChoice)
+                            + " playing=" + juce::String (edit->getTransport().isPlaying() ? 1 : 0)
+                            + " position=" + juce::String (currentPosition(), 3)
+                            + " " + instrumentStateForLog (*track));
         syncTrackControls();
         statusMessage = "Instrument changed: " + instrumentName (newChoice);
         repaint();
@@ -1199,6 +1587,7 @@ private:
     {
         if (keyboardWindow == nullptr)
             return;
+        keyboardWindow->setOctave (keyboardOctave());
         auto* track = selectedTrack();
         keyboardWindow->setTrackEnabled (track != nullptr && drumIndexFor (*track) < 0,
                                           track != nullptr ? track->getName() : juce::String ("No track"));
@@ -1317,10 +1706,11 @@ private:
         if (auto* track = selectedTrack())
             if (const auto drumIndex = drumIndexFor (*track); drumIndex >= 0)
                 return drumPresets[static_cast<size_t> (drumIndex)].midiNote;
-        const auto lane = juce::jlimit (0, static_cast<int> (midiNotes.size()) - 1,
+        const auto count = timelineLaneCount (selectedTrackIndex);
+        const auto lane = juce::jlimit (0, count - 1,
                                         static_cast<int> ((y - content.getY())
-                                            / (content.getHeight() / midiNotes.size())));
-        return midiNotes[static_cast<size_t> (lane)];
+                                            / (content.getHeight() / count)));
+        return timelinePitchRange (selectedTrackIndex).first + lane;
     }
 
     void dragSelectedNote (juce::Point<float> position)
@@ -1536,6 +1926,8 @@ private:
     void toggleRecording()
     {
         recording = ! recording;
+        logInstrumentEvent ("recording " + juce::String (recording ? "started" : "stopped")
+                            + " position=" + juce::String (currentPosition(), 3));
         if (recording)
         {
             if (currentPosition() >= timelineLengthSeconds - 0.02)
@@ -1557,6 +1949,12 @@ private:
             transport.setPosition (tracktion::TimePosition::fromSeconds (0.0));
         if (! transport.isPlaying())
             transport.play (false);
+        if (auto* track = selectedTrack())
+        {
+            armAudioCapture (*track, "transport-play");
+            logInstrumentEvent ("transport-play position=" + juce::String (currentPosition(), 3)
+                                + " " + instrumentStateForLog (*track));
+        }
         updateButtonStates();
         grabKeyboardFocus();
     }
@@ -1564,6 +1962,7 @@ private:
     void stopPlayback()
     {
         auto& transport = edit->getTransport();
+        logInstrumentEvent ("transport-stop position=" + juce::String (currentPosition(), 3));
         finishOpenNotes (currentPosition());
         recording = false;
         transport.stop (false, false);
@@ -1578,7 +1977,13 @@ private:
         return juce::jlimit (0.0, timelineLengthSeconds, edit->getTransport().getPosition().inSeconds());
     }
 
-    void updateCombinedLiveNote (size_t index)
+    int keyboardOctave() const
+    {
+        return juce::jlimit (minimumOctave, maximumOctave,
+                            static_cast<int> (edit->state.getProperty (octaveProperty, 4)));
+    }
+
+    void updateCombinedLiveNote (size_t index, const char* source = "forced-release")
     {
         const auto down = keyboardNotesDown[index];
         if (liveNotesDown[index] == down)
@@ -1590,8 +1995,17 @@ private:
         liveNotesDown[index] = down;
         if (auto* track = selectedTrack())
         {
-            const auto message = down ? juce::MidiMessage::noteOn (1, midiNotes[index], static_cast<juce::uint8> (100))
-                                      : juce::MidiMessage::noteOff (1, midiNotes[index]);
+            const auto pitch = keyboardPitch (index, keyboardOctave());
+            const auto message = down ? juce::MidiMessage::noteOn (1, pitch, static_cast<juce::uint8> (100))
+                                      : juce::MidiMessage::noteOff (1, pitch);
+            logInstrumentEvent ("live-midi source=" + juce::String (source)
+                                + " event=" + (down ? "note-on" : "note-off")
+                                + " pitch=" + juce::String (pitch)
+                                + " octave=" + juce::String (keyboardOctave())
+                                + " playing=" + juce::String (edit->getTransport().isPlaying() ? 1 : 0)
+                                + " " + instrumentStateForLog (*track));
+            if (down)
+                armAudioCapture (*track, "keyboard-note-on");
             track->injectLiveMidiMessage (message, {});
         }
         if (recording)
@@ -1600,7 +2014,7 @@ private:
                 recordingStarts[index] = currentPosition();
             else if (recordingStarts[index] >= 0.0)
             {
-                addRecordedNote (midiNotes[index], recordingStarts[index], currentPosition());
+                addRecordedNote (keyboardPitch (index, keyboardOctave()), recordingStarts[index], currentPosition());
                 recordingStarts[index] = -1.0;
             }
         }
@@ -1613,7 +2027,7 @@ private:
         {
             if (recordingStarts[index] >= 0.0)
             {
-                addRecordedNote (midiNotes[index], recordingStarts[index], endSeconds);
+                addRecordedNote (keyboardPitch (index, keyboardOctave()), recordingStarts[index], endSeconds);
                 recordingStarts[index] = -1.0;
             }
         }
@@ -1628,14 +2042,22 @@ private:
             return;
 
         const auto& drum = drumPresets[static_cast<size_t> (drumIndex)];
+        armAudioCapture (*track, "drum-note-on");
+        logInstrumentEvent ("drum-midi event=note-on pitch=" + juce::String (drum.midiNote)
+                            + " " + instrumentStateForLog (*track));
         track->injectLiveMidiMessage (juce::MidiMessage::noteOn (1, drum.midiNote, static_cast<juce::uint8> (115)), {});
         juce::Timer::callAfterDelay (juce::roundToInt (drum.durationSeconds * 1000.0),
                                      [safe = juce::Component::SafePointer<MainComponent> (this), drumIndex]
         {
             if (safe != nullptr)
                 if (auto* drumTrack = safe->drumTrack (drumIndex))
+                {
+                    safe->logInstrumentEvent ("drum-midi event=note-off pitch="
+                        + juce::String (drumPresets[static_cast<size_t> (drumIndex)].midiNote)
+                        + " " + instrumentStateForLog (*drumTrack));
                     drumTrack->injectLiveMidiMessage (
                         juce::MidiMessage::noteOff (1, drumPresets[static_cast<size_t> (drumIndex)].midiNote), {});
+                }
         });
         if (recordEvent && recording)
             addRecordedNote (*track, drum.midiNote, currentPosition(), currentPosition() + drum.durationSeconds);
@@ -1643,7 +2065,7 @@ private:
         repaint();
     }
 
-    void releaseAllLiveNotes()
+    void releaseAllLiveNotes (const char* reason = "general")
     {
         for (size_t index = 0; index < midiNotes.size(); ++index)
         {
@@ -1651,7 +2073,11 @@ private:
             updateCombinedLiveNote (index);
         }
         for (auto* track : te::getAudioTracks (*edit))
+        {
+            logInstrumentEvent ("live-midi event=all-notes-off reason=" + juce::String (reason)
+                                + " " + instrumentStateForLog (*track));
             track->injectLiveMidiMessage (juce::MidiMessage::allNotesOff (1), {});
+        }
         spaceWasDown = false;
         repaint();
     }
@@ -1669,6 +2095,7 @@ private:
 
     void timerCallback() override
     {
+        drainAudioCapture();
         const auto isPlaying = edit->getTransport().isPlaying();
         if (lastUiPlaying && ! isPlaying && recording)
         {
@@ -1734,13 +2161,29 @@ private:
         return getTimelineContentBounds (selectedTrackIndex);
     }
 
+    std::pair<int, int> timelinePitchRange (int trackIndex) const
+    {
+        auto low = keyboardPitch (0, keyboardOctave());
+        auto high = keyboardPitch (midiNotes.size() - 1, keyboardOctave());
+        const auto tracks = te::getAudioTracks (*edit);
+        if (juce::isPositiveAndBelow (trackIndex, tracks.size()))
+            if (auto* clip = findMidiClip (*tracks[trackIndex]))
+                for (auto* note : clip->getSequence().getNotes())
+                {
+                    low = juce::jmin (low, note->getNoteNumber());
+                    high = juce::jmax (high, note->getNoteNumber());
+                }
+        return { low, high };
+    }
+
     int timelineLaneCount (int trackIndex) const
     {
         const auto tracks = te::getAudioTracks (*edit);
         if (juce::isPositiveAndBelow (trackIndex, tracks.size())
             && drumIndexFor (*tracks[trackIndex]) >= 0)
             return 1;
-        return static_cast<int> (midiNotes.size());
+        const auto range = timelinePitchRange (trackIndex);
+        return range.second - range.first + 1;
     }
 
     int laneForPitch (int pitch, int trackIndex) const
@@ -1751,8 +2194,8 @@ private:
             if (const auto drumIndex = drumIndexFor (*tracks[trackIndex]); drumIndex >= 0)
                 return pitch == drumPresets[static_cast<size_t> (drumIndex)].midiNote ? 0 : -1;
         }
-        const auto found = std::find (midiNotes.begin(), midiNotes.end(), pitch);
-        return found == midiNotes.end() ? -1 : static_cast<int> (std::distance (midiNotes.begin(), found));
+        const auto range = timelinePitchRange (trackIndex);
+        return pitch >= range.first && pitch <= range.second ? pitch - range.first : -1;
     }
 
     int laneForPitch (int pitch) const
@@ -1843,7 +2286,7 @@ private:
                 graphics.setFont (juce::FontOptions (juce::jmin (12.0f, laneHeight), juce::Font::bold));
                 const auto label = drumIndex >= 0
                     ? juce::String (drumPresets[static_cast<size_t> (drumIndex)].name)
-                    : juce::String (noteNames[static_cast<size_t> (lane)]);
+                    : pitchLabel (timelinePitchRange (trackIndex).first + lane);
                 graphics.drawText (label, juce::Rectangle<float> { bounds.getX() + 5.0f, y, 54.0f, laneHeight },
                                    juce::Justification::centredRight);
             }
@@ -1907,7 +2350,7 @@ private:
         const auto position = currentPosition();
         return std::any_of (midiClip->getSequence().getNotes().begin(),
                             midiClip->getSequence().getNotes().end(),
-                            [position, pitch = midiNotes[index], this] (const auto* note)
+                            [position, pitch = keyboardPitch (index, keyboardOctave()), this] (const auto* note)
         {
             return note->getNoteNumber() == pitch
                 && note->getEditStartTime (*midiClip).inSeconds() <= position
@@ -1932,6 +2375,7 @@ private:
 
     te::Engine& engine;
     juce::ApplicationProperties appProperties;
+    std::unique_ptr<juce::FileLogger> instrumentLog;
     std::unique_ptr<te::Edit> edit;
     std::unique_ptr<KeyboardPadWindow> keyboardWindow;
     juce::MenuBarComponent menuBar { this };
@@ -1945,10 +2389,12 @@ private:
     juce::ToggleButton muteButton { "MUTE" }, soloButton { "SOLO" };
     std::array<bool, midiNotes.size()> keyboardNotesDown {};
     std::array<bool, midiNotes.size()> liveNotesDown {};
-    std::array<double, midiNotes.size()> recordingStarts {
-        -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0,
-        -1.0, -1.0, -1.0, -1.0, -1.0, -1.0
-    };
+    std::array<double, midiNotes.size()> recordingStarts = []
+    {
+        std::array<double, midiNotes.size()> starts {};
+        starts.fill (-1.0);
+        return starts;
+    }();
     juce::File currentProjectFile;
     juce::String statusMessage;
     te::MidiNote* selectedNote = nullptr;
@@ -1965,6 +2411,7 @@ private:
     bool recording = false;
     bool lastUiPlaying = false;
     bool updatingTrackControls = false;
+    std::uint32_t nextAudioCapture = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
 };
@@ -2188,6 +2635,115 @@ int runProjectRoundTripTest()
     return 0;
 }
 
+int renderSynthDemos()
+{
+    const auto folder = juce::File::getCurrentWorkingDirectory().getChildFile ("build/synth-demos");
+    if (! folder.createDirectory()) return 40;
+    const auto log = folder.getChildFile ("render-log.txt");
+    log.replaceWithText ("FourOsc direct offline rendering; unchanged application presets\n");
+    te::Engine engine { "MusicBitMakerSynthDemos" };
+    constexpr double sampleRate = 44100.0;
+    constexpr int blockSize = 256;
+    constexpr int totalSamples = 12 * 44100;
+    constexpr std::array<int, 12> melody { 60, 64, 67, 72, 71, 67, 65, 69, 67, 64, 62, 60 };
+    for (int preset = 0; preset < static_cast<int> (synthPresets.size()); ++preset)
+    {
+        const auto name = juce::String (synthPresets[static_cast<size_t> (preset)].name);
+        log.appendText ("Start: " + name + "\n");
+        auto edit = te::createEmptyEdit (engine, {});
+        auto plugin = edit->getPluginCache().createNewPlugin (te::FourOscPlugin::xmlTypeName, {});
+        auto* synth = dynamic_cast<te::FourOscPlugin*> (plugin.get());
+        if (synth == nullptr || ! configureSynth (*synth, preset)) return 41;
+        synth->initialise ({ tracktion::TimePosition::fromSeconds (0.0), sampleRate, blockSize });
+        juce::AudioBuffer<float> result (2, totalSamples);
+        result.clear();
+        for (int offset = 0; offset < totalSamples; offset += blockSize)
+        {
+            const auto count = juce::jmin (blockSize, totalSamples - offset);
+            juce::AudioBuffer<float> block (2, count);
+            block.clear();
+            te::MidiMessageArray midi;
+            const auto addEvent = [&] (int sample, const juce::MidiMessage& message)
+            {
+                if (sample >= offset && sample < offset + count)
+                    midi.addMidiMessage (message, static_cast<double> (sample - offset), {});
+            };
+            // Eight seconds of identical notes, followed by four seconds of release/effect tail.
+            for (size_t note = 0; note < melody.size(); ++note)
+            {
+                const auto start = static_cast<int> (note) * 22050;
+                const auto length = note == melody.size() - 1 ? 110250 : 17640;
+                addEvent (start, juce::MidiMessage::noteOn (1, melody[note], static_cast<juce::uint8> (100)));
+                addEvent (start + length, juce::MidiMessage::noteOff (1, melody[note]));
+            }
+            synth->applyToBuffer ({ &block, juce::AudioChannelSet::stereo(), 0, count, &midi, 0.0,
+                { tracktion::TimePosition::fromSeconds (offset / sampleRate),
+                  tracktion::TimeDuration::fromSeconds (count / sampleRate) }, true, false, true, false });
+            for (int channel = 0; channel < 2; ++channel)
+                result.copyFrom (channel, offset, block, channel, 0, count);
+        }
+        synth->deinitialise();
+        // Identical headroom for all presets; preserve relative loudness without PCM clipping.
+        result.applyGain (0.25f);
+        const auto file = folder.getChildFile (juce::String (preset + 1) + "-" + name.replaceCharacter (' ', '-') + ".wav");
+        file.deleteFile();
+        auto stream = file.createOutputStream();
+        if (stream == nullptr) return 42;
+        juce::WavAudioFormat wav;
+        std::unique_ptr<juce::AudioFormatWriter> writer (wav.createWriterFor (stream.get(), sampleRate, 2, 24, {}, 0));
+        if (writer == nullptr) return 43;
+        stream.release();
+        if (! writer->writeFromAudioSampleBuffer (result, 0, totalSamples)) return 44;
+        writer.reset();
+        log.appendText ("Saved: " + file.getFileName() + "\n");
+    }
+    return 0;
+}
+
+int runKeyboardOctaveTest()
+{
+    int octave = 4;
+    std::vector<int> events;
+    KeyboardPadComponent pad (
+        [&] (size_t index, bool down) { events.push_back ((down ? 1 : -1) * keyboardPitch (index, octave)); },
+        [] (size_t) { return false; }, [] (int, int) {},
+        [&] (int value) { octave = value; });
+    pad.keyPressed (juce::KeyPress ('A', {}, 'a'));
+    pad.keyPressed (juce::KeyPress ('Z', {}, 'z'));
+    if (octave != 3 || events != std::vector<int> { 60, -60 }) return 27;
+    pad.keyPressed (juce::KeyPress ('A', {}, 'a'));
+    pad.keyPressed (juce::KeyPress ('X', {}, 'x'));
+    if (octave != 4 || events != std::vector<int> { 60, -60, 48, -48 }) return 28;
+    auto* box = dynamic_cast<juce::ComboBox*> (pad.getChildComponent (0));
+    if (box == nullptr) return 29;
+    box->setSelectedId (7, juce::sendNotificationSync);
+    if (octave != 6 || keyboardPitch (0, octave) != 84 || pitchLabel (84) != "C6"
+        || compactPitchLabel (85) != "C#6") return 30;
+    for (int i = 0; i < 12; ++i) pad.keyPressed (juce::KeyPress ('X', {}, 'x'));
+    if (octave != maximumOctave || keyboardPitch (midiNotes.size() - 1, octave) != 119) return 31;
+    for (int i = 0; i < 12; ++i) pad.keyPressed (juce::KeyPress ('Z', {}, 'z'));
+    if (octave != minimumOctave || keyboardPitch (0, octave) != 12
+        || keyboardPitch (midiNotes.size() - 1, octave) != 47) return 32;
+    const auto nearBottom = [&pad] (size_t index)
+    {
+        const auto bounds = pad.getKeyBounds (index);
+        return juce::Point<float> (static_cast<float> (bounds.getCentreX()),
+                                   static_cast<float> (bounds.getBottom() - 5));
+    };
+    for (size_t index = 0; index < midiNotes.size(); ++index)
+    {
+        const auto black = std::find (blackNoteIndices.begin(), blackNoteIndices.end(),
+                                      static_cast<int> (index)) != blackNoteIndices.end();
+        const auto point = black ? pad.getKeyBounds (index).getCentre().toFloat()
+                                 : nearBottom (index);
+        if (pad.noteAt (point) != static_cast<int> (index)) return 33;
+    }
+    pad.updateMouseNote (24);
+    pad.updateMouseNote (35);
+    pad.updateMouseNote (-1);
+    return events == std::vector<int> { 60, -60, 48, -48, 36, -36, 47, -47 } ? 0 : 34;
+}
+
 int runEmptyProjectTest()
 {
     te::Engine engine { "MusicBitMakerEmptyProjectTest" };
@@ -2195,11 +2751,13 @@ int runEmptyProjectTest()
         .getNonexistentChildFile ("MusicBitMakerEmptyProjectTest", ".tracktionedit", false);
     auto edit = te::createEmptyEdit (engine, projectFile);
     clearAllTracks (*edit);
+    edit->state.setProperty (octaveProperty, 2, nullptr);
     const auto saved = te::EditFileOperations (*edit).save (false, true, false);
     edit.reset();
     auto loaded = saved ? te::loadEditFromFile (engine, projectFile, te::Edit::forEditing) : nullptr;
     const auto missingDirectory = projectFile.getSiblingFile ("MissingDirectoryForFallback");
     const auto passed = loaded != nullptr
+                     && static_cast<int> (loaded->state.getProperty (octaveProperty, -1)) == 2
                      && te::getAudioTracks (*loaded).isEmpty()
                      && projectDirectoryFor (projectFile.getParentDirectory().getFullPathName())
                             == projectFile.getParentDirectory()
@@ -2210,10 +2768,95 @@ int runEmptyProjectTest()
     return passed ? 0 : 26;
 }
 
+int runInstrumentLogTest()
+{
+    te::Engine engine { "MusicBitMakerInstrumentLogTest" };
+    auto edit = te::createEmptyEdit (engine, {});
+    edit->ensureNumberOfAudioTracks (1);
+    auto* track = te::getAudioTracks (*edit)[0];
+    track->getOutput().setOutputToDefaultDevice (true);
+    if (! track->getOutput().usesDefaultMIDIOut())
+        return 52;
+    routeTrackToAudioOutput (*track);
+    if (! track->getOutput().usesDefaultAudioOut() || track->getOutput().usesDefaultMIDIOut())
+        return 53;
+    auto plugin = edit->getPluginCache().createNewPlugin (te::FourOscPlugin::xmlTypeName, {});
+    auto* synth = dynamic_cast<te::FourOscPlugin*> (plugin.get());
+    if (synth == nullptr || ! configureSynth (*synth, 0))
+        return 45;
+    track->pluginList.insertPlugin (plugin, 0, nullptr);
+
+    const auto before = instrumentStateForLog (*track);
+    if (! configureSynth (*synth, 2))
+        return 46;
+    const auto after = instrumentStateForLog (*track);
+    if (! before.contains ("preset=0") || ! after.contains ("preset=2")
+        || ! after.contains ("defaultAudioOut=1")
+        || ! after.contains ("wave1=2") || ! after.contains ("distortionOn=1")
+        || before == after)
+        return 47;
+
+    const auto file = juce::File::getSpecialLocation (juce::File::tempDirectory)
+        .getNonexistentChildFile ("MusicBitMakerInstrumentLogTest", ".log", false);
+    {
+        juce::FileLogger logger (file, "Instrument log test", 0);
+        logger.logMessage ("instrument-applied " + after);
+        logger.logMessage ("live-midi event=note-on pitch=60 " + after);
+    }
+    const auto contents = file.loadFileAsString();
+    file.deleteFile();
+    return contents.contains ("instrument-applied track=")
+        && contents.contains ("live-midi event=note-on pitch=60 track=") ? 0 : 48;
+}
+
+int runAudioTapTest()
+{
+    te::Engine engine { "MusicBitMakerAudioTapTest" };
+    engine.getPluginManager().createBuiltInType<DiagnosticAudioTap>();
+    auto edit = te::createEmptyEdit (engine, {});
+    auto plugin = edit->getPluginCache().createNewPlugin (DiagnosticAudioTap::xmlTypeName, {});
+    auto* tap = dynamic_cast<DiagnosticAudioTap*> (plugin.get());
+    if (tap == nullptr)
+        return 49;
+
+    juce::AudioBuffer<float> buffer (2, static_cast<int> (DiagnosticAudioTap::windowFrames));
+    for (int channel = 0; channel < 2; ++channel)
+        for (int frame = 0; frame < buffer.getNumSamples(); ++frame)
+            buffer.setSample (channel, frame, channel == 0 ? 0.25f : -0.25f);
+
+    const auto context = te::PluginRenderContext (
+        &buffer, juce::AudioChannelSet::stereo(), 0, buffer.getNumSamples(), nullptr, 0.0,
+        { tracktion::TimePosition::fromSeconds (0.0),
+          tracktion::TimeDuration::fromSeconds (buffer.getNumSamples() / 44100.0) },
+        false, false, false, false);
+    tap->armCapture (1);
+    tap->applyToBuffer (context);
+    DiagnosticAudioTap::Window sounding;
+    if (! tap->popWindow (sounding) || sounding.capture != 1
+        || sounding.frames != DiagnosticAudioTap::windowFrames
+        || sounding.nonZero != 2 * DiagnosticAudioTap::windowFrames
+        || std::abs (std::sqrt (sounding.sumSquares / sounding.samples) - 0.25) > 0.000001
+        || buffer.getSample (0, 0) != 0.25f || buffer.getSample (1, 0) != -0.25f)
+        return 50;
+
+    buffer.clear();
+    tap->armCapture (2);
+    tap->applyToBuffer (context);
+    DiagnosticAudioTap::Window silent;
+    return tap->popWindow (silent) && silent.capture == 2 && silent.nonZero == 0
+        && silent.peak == 0.0f && sounding.hash != silent.hash ? 0 : 51;
+}
+
 int runSelfTest()
 {
+    if (const auto octaveTest = runKeyboardOctaveTest(); octaveTest != 0)
+        return octaveTest;
     if (const auto emptyProject = runEmptyProjectTest(); emptyProject != 0)
         return emptyProject;
+    if (const auto instrumentLog = runInstrumentLogTest(); instrumentLog != 0)
+        return instrumentLog;
+    if (const auto audioTap = runAudioTapTest(); audioTap != 0)
+        return audioTap;
     const auto scalesWork = noteIsInScale (60, 0, 0)
                          && ! noteIsInScale (61, 0, 0)
                          && noteIsInScale (63, 0, 1)
@@ -2241,10 +2884,38 @@ class MusicBitMakerApplication final : public juce::JUCEApplication
 public:
     const juce::String getApplicationName() override { return JUCE_APPLICATION_NAME_STRING; }
     const juce::String getApplicationVersion() override { return JUCE_APPLICATION_VERSION_STRING; }
-    bool moreThanOneInstanceAllowed() override { return false; }
+    bool moreThanOneInstanceAllowed() override
+    {
+        return getCommandLineParameters().contains ("--self-test")
+            || getCommandLineParameters().contains ("--render-synth-demos");
+    }
 
     void initialise (const juce::String& commandLine) override
     {
+        if (commandLine.contains ("--render-synth-demos"))
+        {
+            setApplicationReturnValue (renderSynthDemos());
+            quit();
+            return;
+        }
+        if (commandLine.contains ("--self-test-keyboard-octave"))
+        {
+            setApplicationReturnValue (runKeyboardOctaveTest());
+            quit();
+            return;
+        }
+        if (commandLine.contains ("--self-test-instrument-log"))
+        {
+            setApplicationReturnValue (runInstrumentLogTest());
+            quit();
+            return;
+        }
+        if (commandLine.contains ("--self-test-audio-tap"))
+        {
+            setApplicationReturnValue (runAudioTapTest());
+            quit();
+            return;
+        }
         if (commandLine.contains ("--self-test-empty-project"))
         {
             setApplicationReturnValue (runEmptyProjectTest());
@@ -2258,6 +2929,7 @@ public:
             return;
         }
         engine = std::make_unique<te::Engine> (getApplicationName());
+        engine->getPluginManager().createBuiltInType<DiagnosticAudioTap>();
         mainWindow = std::make_unique<MainWindow> (getApplicationName() + " " + getApplicationVersion(), *engine);
     }
 

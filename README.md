@@ -4,6 +4,10 @@ Windows에서 건반으로 연주하고, 연주 내용을 타임라인에 녹음
 
 현재 저장소에는 C++20/JUCE/Tracktion 네이티브 앱과 초기 아이디어를 검증했던 C# WinForms 건반 프로토타입이 함께 있다.
 
+현재 기능 범위, 단축키, 악기 변경 인수 기준과 알려진 문제는 [기능 명세](docs/functional-spec.md)에서 관리한다. 악기 변경 문제의 출력 라우팅 오류는 v0.1018에서 수정했으며 실제 장치에서의 재검증이 남아 있다. 이전 빌드에서 전체 자체 테스트 실패가 있었으나 v0.1018의 이번 실행은 통과했다. 아래 구현 체크리스트가 모든 기능의 검증 완료를 의미하지는 않는다.
+
+실행 중 악기 변경 문제의 증거, 재현 절차와 다른 세션 조사 인계는 [BUG-001 문제 제기 문서](docs/instrument-change-issue.md)에 정리했다.
+
 현재 앱 버전은 루트의 `VERSION` 파일에서 관리한다. 초기 버전은 `v0.1001`이며, 사용자에게 전달하는 테스트 빌드마다 `v0.1002`, `v0.1003`처럼 `0.0001`씩 증가시킨다. 실행 중인 빌드는 앱 상단과 Windows 창 제목에서 확인할 수 있다.
 
 ## 확정한 기술 방향
@@ -188,6 +192,22 @@ Tracktion Engine의 `Edit`를 프로젝트 상태의 기준으로 삼는다. UI 
 - 오디오 파일 가져오기와 라이선스 메타데이터 기록
 
 VST3 호스팅, ASIO, 복잡한 자동화, 고급 마스터링은 위 기본 흐름이 안정된 뒤 추가한다.
+
+## 건반 옥타브
+
+건반 창은 3옥타브(36음)를 표시하며 마우스로 모든 음을 연주하고 녹음할 수 있다. 시작 옥타브는 맨 왼쪽의 `Octave` 드롭다운에서 0~6으로 선택한다. 기본값 4의 화면 범위는 C4~B6이며, `Z`/`X`는 화면 전체를 한 옥타브씩 이동한다. 이전 프로젝트에 저장된 시작 옥타브 7~8은 열 때 6으로 맞춘다. 컴퓨터 키 A~K는 화면 왼쪽의 첫 13음에 연결된다. 건반의 음 이름, 실제 연주와 녹음 음높이가 함께 바뀐다. 옥타브를 바꾸면 누르고 있던 음은 먼저 종료되며, 선택한 옥타브는 프로젝트에 저장된다. 타임라인은 현재 화면 건반 범위와 기존 녹음 노트를 포함해 표시한다.
+
+옥타브 UI·단축키 테스트: `.\build\MusicBitMaker_artefacts\Debug\MusicBitMaker.exe --self-test-keyboard-octave`
+
+## 악기 변경 진단 로그
+
+앱은 실행할 때마다 로컬 `instrument-diagnostic.log`에 버전과 실행 파일 경로를 기록한다. 트랙의 `Change Instrument...` 선택과 적용 전후에는 트랙·FourOsc ID, 프리셋 번호, 주요 합성 파라미터를 기록한다. 화면 건반과 컴퓨터 건반의 Note On/Off, 드럼 입력, 재생·녹음 시작과 종료도 기록한다. 로그 파일은 앱의 `View > Show Instrument Diagnostic Log`에서 탐색기로 열 수 있다. Windows 저장 위치는 JUCE 시스템 로그 폴더의 `MusicBitMaker\instrument-diagnostic.log`이며, 기존 파일이 1MB를 넘으면 다음 실행 시 앞부분을 줄인다.
+
+기본 이벤트 로그는 UI 입력과 Tracktion Edit 플러그인 상태를 기록한다. 로그는 프로젝트 파일에 저장되지 않으며 Git에 포함하지 않는다. 독립 검사: `.\build\MusicBitMaker_artefacts\Debug\MusicBitMaker.exe --self-test-instrument-log`.
+
+v0.1017부터 악기 변경·건반 Note On·재생 시작 뒤에는 Tracktion의 실시간 오디오 그래프에서 `post-synth`, `post-track`, `post-master` 세 지점의 4096프레임 구간을 기록한다. `audio-capture-start`의 ID와 `audio-window`의 ID를 맞춰 읽는다. 각 구간에는 원본 float 파형 비트의 64비트 해시, RMS, 피크, 0이 아닌 샘플 수가 포함된다. 오디오 콜백에서는 고정 크기 메모리에 수치만 수집하고, UI 타이머가 파일에 기록한다. 해시는 작은 샘플 차이에도 바뀌므로 음색 유사도를 뜻하지 않는다. `post-master`는 오디오 장치로 보내기 전의 앱 내부 출력이며, 물리적 스피커 소리를 측정하지 않는다. 독립 검사: `.\build\MusicBitMaker_artefacts\Debug\MusicBitMaker.exe --self-test-audio-tap`.
+
+v0.1018은 트랙 출력을 기본 오디오 장치로 연결한다. 이전 빌드는 Tracktion의 `setOutputToDefaultDevice(true)`를 MIDI 출력으로 잘못 해석해 내부 FourOsc 소리가 마스터 오디오 경로에 도달하지 않았다. 로그의 `defaultAudioOut=1`은 트랙 라우팅 상태를 뜻하며, 새 연주에서 `post-master`의 `nonZero`와 해시로 내부 오디오 전달 여부를 확인할 수 있다.
 
 ## 실시간 오디오 규칙
 

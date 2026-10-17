@@ -41,6 +41,11 @@ Canonical native commands:
 - Release build: `cmake --build build --config Release --target MusicBitMaker`
 - Run: `.\build\MusicBitMaker_artefacts\Debug\MusicBitMaker.exe`
 - Self-test: `.\build\MusicBitMaker_artefacts\Debug\MusicBitMaker.exe --self-test`
+- Keyboard octave UI/shortcut test: `.\build\MusicBitMaker_artefacts\Debug\MusicBitMaker.exe --self-test-keyboard-octave`
+- Instrument diagnostic log test: `.\build\MusicBitMaker_artefacts\Debug\MusicBitMaker.exe --self-test-instrument-log`
+- Real-time audio tap test: `.\build\MusicBitMaker_artefacts\Debug\MusicBitMaker.exe --self-test-audio-tap`
+- Synth comparison WAVs: `.\build\MusicBitMaker_artefacts\Debug\MusicBitMaker.exe --render-synth-demos` (writes ignored `build/synth-demos/`; offline diagnostic, not the full Edit rendering test).
+- Compare/concatenate demos: `python tools/compare-synth-demos.py` (requires NumPy).
 
 Temporary C# prototype:
 
