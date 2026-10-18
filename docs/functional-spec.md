@@ -1,6 +1,6 @@
 # MusicBitMaker 기능 명세
 
-기준일: 2026-10-18 · 기준 소스 버전: v0.1024 · 대상: Windows x64 네이티브 앱
+기준일: 2026-10-18 · 기준 소스 버전: v0.1025 · 대상: Windows x64 네이티브 앱
 
 이 문서는 현재 제품 동작, 기대 동작, 검증 상태를 구분하는 기준이다. `src/Main.cpp`, `README.md`와 현재 작업 폴더의 구현을 기준으로 작성했다. “구현”은 코드 경로가 존재한다는 뜻이며, 모든 사용자 시나리오가 정상 검증되었다는 뜻은 아니다. 특히 악기 음색 변경은 사용자 보고에 따라 미해결 문제로 관리한다.
 
@@ -43,7 +43,7 @@
 | TRK-03 | 이름 변경 / 삭제 | 트랙 우클릭 메뉴로 실행 | 구현 |
 | TRK-04 | 행 높이 조절 | 트랙 사이 경계를 드래그. 조절한 높이는 프로젝트에 저장 | 구현 |
 | INST-01 | 악기 변경 | 선택 트랙의 우클릭 → Settings → Change Instrument. 표시와 실제 출력이 새 악기로 일치해야 함 | 구현, 음색 변경 결함 보고됨 |
-| INST-02 | 음색 조절 | 선택 트랙의 우클릭 → Settings → Sound Controls. 파형, Attack/Release, Cutoff/Resonance, Reverb Mix를 FourOsc 상태에 적용 | 구현, 독립 검사 통과·실제 청취 필요 |
+| INST-02 | 실시간 음색 조절 | 건반 창 아래 Sound Controls 패널 또는 트랙 우클릭 → Settings → Sound Controls. 파형, Attack/Release, Cutoff/Resonance, Reverb Mix 변경을 Apply 없이 FourOsc 상태에 즉시 반영 | 구현, 독립 검사 통과·실제 청취 필요 |
 | KEY-01 | 건반 입력 | 화면 클릭·드래그 또는 PC 키보드로 Note On/Off. 선택한 신시사이저 트랙으로 입력 | 구현 |
 | KEY-02 | 음계 안내 | Root와 Major/Natural Minor 선택. 기준음과 음계 구성음을 색으로 강조 | 구현 |
 | KEY-03 | 옥타브 | Octave 드롭다운 또는 기본 N/M. 시작 범위 0~6, 새 프로젝트 기본 3 | 구현, 전용 테스트 통과 |

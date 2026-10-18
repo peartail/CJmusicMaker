@@ -219,6 +219,8 @@ v0.1023은 `Settings > Sound Controls...`에서 Oscillator 1 파형, Attack/Rele
 
 v0.1024는 `Edit > Shortcuts...`에 Root와 Scale 선택기를 추가한다. 피아노 36음 단축키는 C~B의 Root와 Major/Natural Minor 조합별 24개 프로필로 저장되며, 건반 창에서 Root/Scale을 바꾸면 해당 프로필이 즉시 적용된다. 드럼과 옥타브 이동 키는 음계와 관계없는 공통 설정으로 유지한다. 기존 v0.1021 단일 단축키 설정은 처음 실행할 때 24개 프로필의 시작값으로 자동 사용한다.
 
+v0.1025는 건반 창의 `SOUND CONTROLS +`를 누르면 아래에 파형, Attack/Release, Filter Cutoff/Resonance, Reverb Mix 패널을 펼친다. 별도 Apply 없이 값을 바꾸는 즉시 선택한 신시사이저 트랙의 FourOsc에 반영된다. 트랙 우클릭의 `Settings > Sound Controls`도 같은 패널을 열며, 드럼 트랙에서는 사용할 수 없다.
+
 ## 실시간 오디오 규칙
 
 - 오디오 콜백에서 파일 입출력, 동적 메모리 할당, UI 호출, 긴 잠금, 로그 출력을 하지 않는다.

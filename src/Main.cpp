@@ -689,12 +689,16 @@ public:
                           std::function<void (size_t, bool)> noteChangedToUse,
                           std::function<bool (size_t)> noteIsDownToUse,
                           std::function<void (int, int)> scaleChangedToUse,
-                          std::function<void (int)> octaveChangedToUse)
+                          std::function<void (int)> octaveChangedToUse,
+                          std::function<void (const SynthControls&, bool)> soundControlsChangedToUse,
+                          std::function<void (bool)> expansionChangedToUse)
         : shortcuts (shortcutsToUse),
           noteChanged (std::move (noteChangedToUse)),
           noteIsDown (std::move (noteIsDownToUse)),
           scaleChanged (std::move (scaleChangedToUse)),
-          octaveChanged (std::move (octaveChangedToUse))
+          octaveChanged (std::move (octaveChangedToUse)),
+          soundControlsChanged (std::move (soundControlsChangedToUse)),
+          expansionChanged (std::move (expansionChangedToUse))
     {
         setWantsKeyboardFocus (true);
         setSize (1160, 250);
@@ -725,6 +729,36 @@ public:
         addAndMakeVisible (scaleBox);
         for (auto* box : { &octaveBox, &rootBox, &scaleBox })
             box->setWantsKeyboardFocus (false);
+
+        soundControlsButton.onClick = [this] { setSoundControlsExpanded (! soundControlsExpanded); };
+        soundControlsButton.setMouseClickGrabsKeyboardFocus (false);
+        addAndMakeVisible (soundControlsButton);
+
+        const auto waveforms = synthWaveformNames();
+        for (int index = 0; index < waveforms.size(); ++index)
+            waveformBox.addItem (waveforms[index], index + 1);
+        waveformBox.setWantsKeyboardFocus (false);
+        waveformBox.onChange = [this]
+        {
+            if (! updatingSoundControls)
+                notifySoundControls (true);
+        };
+        addAndMakeVisible (waveformBox);
+
+        configureSoundSlider (attackSlider, 0.001, 10.0, 0.001, " s");
+        configureSoundSlider (releaseSlider, 0.001, 10.0, 0.001, " s");
+        configureSoundSlider (cutoffSlider, 20.0, 20000.0, 1.0, " Hz");
+        cutoffSlider.setSkewFactorFromMidPoint (1000.0);
+        configureSoundSlider (resonanceSlider, 0.0, 100.0, 0.1, " %");
+        configureSoundSlider (reverbSlider, 0.0, 100.0, 0.1, " %");
+        for (auto* slider : { &attackSlider, &releaseSlider, &cutoffSlider,
+                              &resonanceSlider, &reverbSlider })
+            slider->onValueChange = [this]
+            {
+                if (! updatingSoundControls)
+                    notifySoundControls (false);
+            };
+        updateSoundControlVisibility();
     }
 
     ~KeyboardPadComponent() override
@@ -748,11 +782,47 @@ public:
         repaint();
     }
 
+    void setSoundControls (const SynthControls& controls, bool available)
+    {
+        juce::ScopedValueSetter<bool> guard (updatingSoundControls, true);
+        soundControlsAvailable = available;
+        soundControlsButton.setEnabled (available);
+        waveformBox.setSelectedId (juce::jlimit (1, 5, controls.waveform), juce::dontSendNotification);
+        attackSlider.setValue (controls.attackSeconds, juce::dontSendNotification);
+        releaseSlider.setValue (controls.releaseSeconds, juce::dontSendNotification);
+        cutoffSlider.setValue (controls.cutoffHz, juce::dontSendNotification);
+        resonanceSlider.setValue (controls.resonancePercent, juce::dontSendNotification);
+        reverbSlider.setValue (controls.reverbMixPercent, juce::dontSendNotification);
+        if (! available && soundControlsExpanded)
+            setSoundControlsExpanded (false);
+        updateSoundControlVisibility();
+        repaint();
+    }
+
+    void showSoundControls()
+    {
+        if (soundControlsAvailable)
+            setSoundControlsExpanded (true);
+    }
+
     void resized() override
     {
         octaveBox.setBounds (12, 10, 116, 30);
         rootBox.setBounds (136, 10, 120, 30);
         scaleBox.setBounds (264, 10, 160, 30);
+        soundControlsButton.setBounds (432, 10, 164, 30);
+
+        auto controls = juce::Rectangle<int> (12, 274, getWidth() - 24, 100);
+        constexpr int gap = 8;
+        const auto columnWidth = (controls.getWidth() - gap * 5) / 6;
+        waveformBox.setBounds (controls.removeFromLeft (columnWidth).withTrimmedTop (24).withHeight (30));
+        controls.removeFromLeft (gap);
+        for (auto* slider : { &attackSlider, &releaseSlider, &cutoffSlider,
+                              &resonanceSlider, &reverbSlider })
+        {
+            slider->setBounds (controls.removeFromLeft (columnWidth));
+            controls.removeFromLeft (gap);
+        }
     }
 
     void setOctave (int octave)
@@ -775,12 +845,28 @@ public:
                                              + shortcutKeyName (shortcuts.keys[ShortcutMap::octaveDown]) + "/"
                                              + shortcutKeyName (shortcuts.keys[ShortcutMap::octaveUp])
                                        : "KEYBOARD DISABLED  |  Select a keyboard track",
-                           432, 10, getWidth() - 444, 30, juce::Justification::centredLeft);
+                           606, 10, getWidth() - 618, 30, juce::Justification::centredLeft);
 
         for (const auto index : whiteNoteIndices)
             drawKey (graphics, static_cast<size_t> (index), false);
         for (const auto index : blackNoteIndices)
             drawKey (graphics, static_cast<size_t> (index), true);
+
+        if (soundControlsExpanded)
+        {
+            graphics.setColour (juce::Colour::fromRGB (30, 35, 47));
+            graphics.fillRoundedRectangle (8.0f, 258.0f, static_cast<float> (getWidth() - 16),
+                                            static_cast<float> (getHeight() - 266), 7.0f);
+            graphics.setColour (juce::Colour::fromRGB (190, 198, 214));
+            graphics.setFont (juce::FontOptions (12.0f, juce::Font::bold));
+            constexpr std::array<const char*, 6> labels {
+                "WAVEFORM", "ATTACK", "RELEASE", "FILTER CUTOFF", "RESONANCE", "REVERB MIX"
+            };
+            const auto width = (getWidth() - 24 - 8 * 5) / 6;
+            for (size_t index = 0; index < labels.size(); ++index)
+                graphics.drawText (labels[index], 12 + static_cast<int> (index) * (width + 8), 266,
+                                   width, 20, juce::Justification::centred);
+        }
     }
 
     bool keyPressed (const juce::KeyPress& key) override
@@ -853,9 +939,53 @@ private:
         repaint();
     }
 
+    void configureSoundSlider (juce::Slider& slider, double minimum, double maximum,
+                               double interval, const juce::String& suffix)
+    {
+        slider.setRange (minimum, maximum, interval);
+        slider.setSliderStyle (juce::Slider::LinearHorizontal);
+        slider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 88, 20);
+        slider.setTextValueSuffix (suffix);
+        slider.setWantsKeyboardFocus (false);
+        addAndMakeVisible (slider);
+    }
+
+    void setSoundControlsExpanded (bool expanded)
+    {
+        if (soundControlsExpanded == expanded)
+            return;
+        soundControlsExpanded = expanded;
+        soundControlsButton.setButtonText (expanded ? "SOUND CONTROLS -" : "SOUND CONTROLS +");
+        updateSoundControlVisibility();
+        expansionChanged (expanded);
+        resized();
+        repaint();
+    }
+
+    void updateSoundControlVisibility()
+    {
+        const auto visible = soundControlsAvailable && soundControlsExpanded;
+        waveformBox.setVisible (visible);
+        for (auto* slider : { &attackSlider, &releaseSlider, &cutoffSlider,
+                              &resonanceSlider, &reverbSlider })
+            slider->setVisible (visible);
+    }
+
+    void notifySoundControls (bool waveformChanged)
+    {
+        SynthControls controls;
+        controls.waveform = waveformBox.getSelectedId();
+        controls.attackSeconds = static_cast<float> (attackSlider.getValue());
+        controls.releaseSeconds = static_cast<float> (releaseSlider.getValue());
+        controls.cutoffHz = static_cast<float> (cutoffSlider.getValue());
+        controls.resonancePercent = static_cast<float> (resonanceSlider.getValue());
+        controls.reverbMixPercent = static_cast<float> (reverbSlider.getValue());
+        soundControlsChanged (controls, waveformChanged);
+    }
+
     juce::Rectangle<int> getKeyArea() const
     {
-        return getLocalBounds().withTrimmedTop (50).reduced (8, 4);
+        return { 8, 54, getWidth() - 16, 192 };
     }
 
     juce::Rectangle<int> getKeyBounds (size_t index) const
@@ -935,12 +1065,17 @@ private:
     std::function<bool (size_t)> noteIsDown;
     std::function<void (int, int)> scaleChanged;
     std::function<void (int)> octaveChanged;
-    juce::ComboBox octaveBox, rootBox, scaleBox;
+    std::function<void (const SynthControls&, bool)> soundControlsChanged;
+    std::function<void (bool)> expansionChanged;
+    juce::ComboBox octaveBox, rootBox, scaleBox, waveformBox;
+    juce::TextButton soundControlsButton { "SOUND CONTROLS +" };
+    juce::Slider attackSlider, releaseSlider, cutoffSlider, resonanceSlider, reverbSlider;
     int currentOctave = 3;
     std::array<bool, midiNotes.size()> keyboardDown {};
     std::array<bool, midiNotes.size()> sentDown {};
     int mouseNote = -1;
-    bool updatingScale = false;
+    bool updatingScale = false, updatingSoundControls = false;
+    bool soundControlsAvailable = false, soundControlsExpanded = false;
 };
 
 class KeyboardPadWindow final : public juce::DocumentWindow
@@ -951,6 +1086,7 @@ public:
                        std::function<bool (size_t)> noteIsDown,
                        std::function<void (int, int)> scaleChanged,
                        std::function<void (int)> octaveChanged,
+                       std::function<void (const SynthControls&, bool)> soundControlsChanged,
                        std::function<void()> closedToUse)
         : DocumentWindow ("Keyboard Pad", juce::Colour::fromRGB (20, 23, 31),
                           minimiseButton | closeButton),
@@ -958,9 +1094,11 @@ public:
     {
         setUsingNativeTitleBar (true);
         setResizable (true, false);
-        setResizeLimits (900, 220, 1600, 420);
+        setResizeLimits (900, 280, 1600, 280);
         pad = new KeyboardPadComponent (shortcuts, std::move (noteChanged), std::move (noteIsDown),
-                                        std::move (scaleChanged), std::move (octaveChanged));
+                                        std::move (scaleChanged), std::move (octaveChanged),
+                                        std::move (soundControlsChanged),
+                                        [this] (bool expanded) { setSoundControlsExpanded (expanded); });
         setContentOwned (pad, true);
         centreWithSize (1160, 280);
         setAlwaysOnTop (true);
@@ -988,6 +1126,19 @@ public:
         pad->setScale (rootIndex, scaleIndex);
     }
 
+    void setSoundControls (const SynthControls& controls, bool available)
+    {
+        pad->setSoundControls (controls, available);
+    }
+
+    void showSoundControls()
+    {
+        pad->showSoundControls();
+        setMinimised (false);
+        setVisible (true);
+        toFront (true);
+    }
+
     void closeButtonPressed() override
     {
         pad->setTrackEnabled (false);
@@ -996,6 +1147,13 @@ public:
     }
 
 private:
+    void setSoundControlsExpanded (bool expanded)
+    {
+        const auto height = expanded ? 420 : 280;
+        setResizeLimits (900, height, 1600, height);
+        setSize (getWidth(), height);
+    }
+
     KeyboardPadComponent* pad = nullptr;
     std::function<void()> closed;
 };
@@ -1485,6 +1643,10 @@ public:
             {
                 edit->state.setProperty (octaveProperty, octave, nullptr);
                 repaint();
+            },
+            [this] (const SynthControls& controls, bool waveformChanged)
+            {
+                applyLiveSynthControls (controls, waveformChanged);
             },
             [this] { menuItemsChanged(); });
         shortcutEditorWindow = std::make_unique<ShortcutEditorWindow> (
@@ -2280,62 +2442,32 @@ private:
         grabKeyboardFocus();
     }
 
-    void showSelectedTrackSoundControls()
+    void applyLiveSynthControls (const SynthControls& controls, bool waveformChanged)
     {
         auto* track = selectedTrack();
-        auto* synth = track != nullptr ? findInstrument (*track) : nullptr;
+        auto* synth = track != nullptr && drumIndexFor (*track) < 0 ? findInstrument (*track) : nullptr;
         if (synth == nullptr)
             return;
 
-        const auto current = readSynthControls (*synth);
-        juce::AlertWindow dialog (
-            "Sound Controls", "Attack fades the sound in. Release lets it fade after key-up.\n"
-                              "Cutoff changes brightness; Resonance emphasises the cutoff.\n"
-                              "Reverb Mix blends the dry sound with room-like reflections.",
-            juce::MessageBoxIconType::NoIcon);
-        dialog.addComboBox ("waveform", synthWaveformNames(), "Oscillator 1 waveform");
-        if (auto* combo = dialog.getComboBoxComponent ("waveform"))
-            combo->setSelectedItemIndex (juce::jlimit (1, 5, current.waveform) - 1,
-                                         juce::dontSendNotification);
-        dialog.addTextEditor ("attack", juce::String (current.attackSeconds, 3), "Attack (seconds)");
-        dialog.addTextEditor ("release", juce::String (current.releaseSeconds, 3), "Release (seconds)");
-        dialog.addTextEditor ("cutoff", juce::String (current.cutoffHz, 0), "Filter Cutoff (Hz)");
-        dialog.addTextEditor ("resonance", juce::String (current.resonancePercent, 1), "Resonance (%)");
-        dialog.addTextEditor ("reverb", juce::String (current.reverbMixPercent, 1), "Reverb Mix (%)");
-        for (const auto name : { "attack", "release", "cutoff", "resonance", "reverb" })
-            if (auto* editor = dialog.getTextEditor (name))
-                editor->setInputRestrictions (9, "0123456789.");
-        dialog.addButton ("Apply", 1, juce::KeyPress (juce::KeyPress::returnKey));
-        dialog.addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
-        if (dialog.runModalLoop() != 1)
+        if (waveformChanged)
         {
-            grabKeyboardFocus();
-            return;
+            finishOpenNotes (currentPosition());
+            releaseAllLiveNotes ("live-waveform-change");
         }
-
-        SynthControls changed;
-        if (auto* combo = dialog.getComboBoxComponent ("waveform"))
-            changed.waveform = combo->getSelectedItemIndex() + 1;
-        changed.attackSeconds = dialog.getTextEditorContents ("attack").getFloatValue();
-        changed.releaseSeconds = dialog.getTextEditorContents ("release").getFloatValue();
-        changed.cutoffHz = dialog.getTextEditorContents ("cutoff").getFloatValue();
-        changed.resonancePercent = dialog.getTextEditorContents ("resonance").getFloatValue();
-        changed.reverbMixPercent = dialog.getTextEditorContents ("reverb").getFloatValue();
-
-        finishOpenNotes (currentPosition());
-        releaseAllLiveNotes ("sound-controls-change");
-        if (! applySynthControls (*synth, changed))
-        {
-            statusMessage = "Could not apply sound controls";
-            repaint();
+        if (! applySynthControls (*synth, controls))
             return;
-        }
-        edit->getTransport().ensureContextAllocated (true);
-        armAudioCapture (*track, "sound-controls-change");
-        logInstrumentEvent ("sound-controls-applied " + instrumentStateForLog (*track));
-        statusMessage = "Sound controls applied";
+        statusMessage = "Sound controls updated live";
         repaint();
-        grabKeyboardFocus();
+    }
+
+    void showSelectedTrackSoundControls()
+    {
+        if (keyboardWindow == nullptr || selectedTrack() == nullptr
+            || drumIndexFor (*selectedTrack()) >= 0)
+            return;
+        syncKeyboardWindow();
+        keyboardWindow->showSoundControls();
+        menuItemsChanged();
     }
 
     void showTrackContextMenu()
@@ -2343,7 +2475,8 @@ private:
         juce::PopupMenu menu;
         juce::PopupMenu settingsMenu;
         settingsMenu.addItem (2, "Change Instrument...");
-        settingsMenu.addItem (4, "Sound Controls...");
+        settingsMenu.addItem (4, "Sound Controls",
+                              selectedTrack() != nullptr && drumIndexFor (*selectedTrack()) < 0);
         menu.addItem (1, "Rename...");
         menu.addSubMenu ("Settings", settingsMenu);
         menu.addSeparator();
@@ -2384,6 +2517,11 @@ private:
         auto* track = selectedTrack();
         keyboardWindow->setTrackEnabled (track != nullptr && drumIndexFor (*track) < 0,
                                           track != nullptr ? track->getName() : juce::String ("No track"));
+        if (track != nullptr && drumIndexFor (*track) < 0)
+            if (auto* synth = findInstrument (*track))
+                keyboardWindow->setSoundControls (readSynthControls (*synth), true);
+        if (track == nullptr || drumIndexFor (*track) >= 0 || findInstrument (*track) == nullptr)
+            keyboardWindow->setSoundControls ({}, false);
         keyboardWindow->setScale (
             static_cast<int> (edit->state.getProperty (scaleRootProperty, 0)),
             static_cast<int> (edit->state.getProperty (scaleTypeProperty, 0)));
@@ -3636,11 +3774,20 @@ int runKeyboardOctaveTest()
     auto shortcuts = ShortcutMap::defaults();
     int octave = 3;
     std::vector<int> events;
+    bool expanded = false, sawWaveformChange = false, sawSliderChange = false;
+    SynthControls liveControls;
     KeyboardPadComponent pad (
         shortcuts,
         [&] (size_t index, bool down) { events.push_back ((down ? 1 : -1) * keyboardPitch (index, octave)); },
         [] (size_t) { return false; }, [] (int, int) {},
-        [&] (int value) { octave = value; });
+        [&] (int value) { octave = value; },
+        [&] (const SynthControls& controls, bool waveformChanged)
+        {
+            liveControls = controls;
+            sawWaveformChange = sawWaveformChange || waveformChanged;
+            sawSliderChange = sawSliderChange || ! waveformChanged;
+        },
+        [&] (bool value) { expanded = value; });
     pad.keyPressed (juce::KeyPress ('A', {}, 'a'));
     pad.keyPressed (juce::KeyPress ('N', {}, 'n'));
     if (octave != 2 || events != std::vector<int> { 60, -60 }) return 27;
@@ -3674,6 +3821,16 @@ int runKeyboardOctaveTest()
     pad.updateMouseNote (24);
     pad.updateMouseNote (35);
     pad.updateMouseNote (-1);
+    pad.setSoundControls ({ 2, 0.1f, 0.2f, 1000.0f, 10.0f, 5.0f }, true);
+    pad.showSoundControls();
+    auto* waveform = dynamic_cast<juce::ComboBox*> (pad.getChildComponent (4));
+    auto* attack = dynamic_cast<juce::Slider*> (pad.getChildComponent (5));
+    if (! expanded || waveform == nullptr || attack == nullptr) return 35;
+    waveform->setSelectedId (4, juce::sendNotificationSync);
+    attack->setValue (0.5, juce::sendNotificationSync);
+    if (! sawWaveformChange || ! sawSliderChange || liveControls.waveform != 4
+        || std::abs (liveControls.attackSeconds - 0.5f) > 0.001f)
+        return 36;
     return events == std::vector<int> { 60, -60, 48, -48, 36, -36, 47, -47 } ? 0 : 34;
 }
 

@@ -150,7 +150,7 @@ LFO는 `Low Frequency Oscillator`, 즉 저주파 오실레이터의 약자다. �
 
 ## Track Settings에 넣을 수 있는 항목
 
-v0.1022부터 트랙 우클릭의 `Settings` 아래에서 `Change Instrument...`를 연다. v0.1023에서는 같은 메뉴의 `Sound Controls...`에서 Oscillator 1 파형, Attack/Release, Filter Cutoff/Resonance, Reverb Mix를 직접 입력하고 적용할 수 있다.
+v0.1022부터 트랙 우클릭의 `Settings` 아래에서 `Change Instrument...`를 연다. v0.1025에서는 건반 창의 `SOUND CONTROLS +` 또는 같은 메뉴의 `Sound Controls`로 아래 패널을 펼친다. Oscillator 1 파형, Attack/Release, Filter Cutoff/Resonance, Reverb Mix는 별도 Apply 없이 조작 즉시 현재 신시사이저에 반영된다.
 
 | 설정 묶음 | 대표 조절값 | 귀로 느껴지는 변화 |
 | --- | --- | --- |
