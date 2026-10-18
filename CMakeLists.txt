@@ -46,6 +46,7 @@ target_compile_definitions(MusicBitMaker PRIVATE
 target_link_libraries(MusicBitMaker PRIVATE
     tracktion::tracktion_engine
     juce::juce_audio_utils
+    juce::juce_dsp
     juce::juce_gui_extra
     PUBLIC
     juce::juce_recommended_warning_flags)

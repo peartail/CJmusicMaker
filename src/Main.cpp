@@ -1,5 +1,6 @@
 #include <tracktion_engine/tracktion_engine.h>
 #include <juce_audio_utils/juce_audio_utils.h>
+#include <juce_dsp/juce_dsp.h>
 #include <juce_gui_extra/juce_gui_extra.h>
 
 #include <algorithm>
@@ -30,7 +31,6 @@ constexpr auto midiNotes = []
         notes[index] = 60 + static_cast<int> (index);
     return notes;
 }();
-constexpr std::array<char, 13> keyChars { 'A', 'W', 'S', 'E', 'D', 'F', 'T', 'G', 'Y', 'H', 'U', 'J', 'K' };
 constexpr std::array<int, 7> whiteSemitones { 0, 2, 4, 5, 7, 9, 11 };
 constexpr std::array<int, 5> blackSemitones { 1, 3, 6, 8, 10 };
 constexpr std::array<int, 5> blackSlots { 0, 1, 3, 4, 5 };
@@ -66,6 +66,161 @@ const juce::Identifier scaleRootProperty { "musicBitMakerScaleRoot" };
 const juce::Identifier scaleTypeProperty { "musicBitMakerScaleType" };
 const juce::Identifier octaveProperty { "musicBitMakerKeyboardOctave" };
 constexpr int minimumOctave = 0, maximumOctave = 6;
+constexpr auto shortcutSchemaVersionKey = "shortcutSchemaVersion";
+constexpr auto shortcutMapKey = "shortcutMap";
+constexpr auto shortcutProfileKeyPrefix = "shortcutMap.";
+
+struct ShortcutMap
+{
+    static constexpr size_t pianoCount = midiNotes.size();
+    static constexpr size_t drumBase = pianoCount;
+    static constexpr size_t kickAlternate = drumBase + 4;
+    static constexpr size_t octaveDown = kickAlternate + 1;
+    static constexpr size_t octaveUp = octaveDown + 1;
+    static constexpr size_t actionCount = octaveUp + 1;
+
+    std::array<int, actionCount> keys {};
+
+    static ShortcutMap defaults()
+    {
+        ShortcutMap result;
+        constexpr std::array<int, 12> middleKeys {
+            'A', 'W', 'S', 'E', 'D', 'F', 'T', 'G', 'Y', 'H', 'U', 'J'
+        };
+        std::copy (middleKeys.begin(), middleKeys.end(), result.keys.begin() + 12);
+        result.keys[drumBase + 0] = 'Z';
+        result.keys[drumBase + 1] = 'X';
+        result.keys[drumBase + 2] = 'C';
+        result.keys[drumBase + 3] = 'V';
+        result.keys[kickAlternate] = juce::KeyPress::spaceKey;
+        result.keys[octaveDown] = 'N';
+        result.keys[octaveUp] = 'M';
+        return result;
+    }
+
+    int actionForKey (int keyCode) const
+    {
+        const auto found = std::find (keys.begin(), keys.end(), keyCode);
+        return keyCode != 0 && found != keys.end()
+             ? static_cast<int> (std::distance (keys.begin(), found)) : -1;
+    }
+
+    bool isValid() const
+    {
+        std::vector<int> assigned;
+        for (const auto key : keys)
+        {
+            if (key == 0)
+                continue;
+            if (key < 32 || key > 126 || std::find (assigned.begin(), assigned.end(), key) != assigned.end())
+                return false;
+            assigned.push_back (key);
+        }
+        return true;
+    }
+};
+
+constexpr size_t shortcutProfileCount = rootNames.size() * scaleNames.size();
+using ShortcutProfiles = std::array<ShortcutMap, shortcutProfileCount>;
+
+size_t shortcutProfileIndex (int rootIndex, int scaleIndex)
+{
+    return static_cast<size_t> (juce::jlimit (0, 1, scaleIndex)) * rootNames.size()
+         + static_cast<size_t> (juce::jlimit (0, 11, rootIndex));
+}
+
+ShortcutProfiles defaultShortcutProfiles()
+{
+    ShortcutProfiles profiles;
+    profiles.fill (ShortcutMap::defaults());
+    return profiles;
+}
+
+void applySharedShortcutActions (ShortcutProfiles& profiles, const ShortcutMap& source)
+{
+    for (auto& profile : profiles)
+        for (size_t action = ShortcutMap::drumBase; action < ShortcutMap::actionCount; ++action)
+        {
+            const auto key = source.keys[action];
+            if (const auto existing = profile.actionForKey (key);
+                key != 0 && existing >= 0 && existing < static_cast<int> (ShortcutMap::drumBase))
+                profile.keys[static_cast<size_t> (existing)] = 0;
+            profile.keys[action] = key;
+        }
+}
+
+int canonicalShortcutKey (const juce::KeyPress& key)
+{
+    if (key.getModifiers().isAnyModifierKeyDown())
+        return 0;
+    const auto keyCode = key.getKeyCode();
+    if (keyCode >= 'a' && keyCode <= 'z')
+        return keyCode - 'a' + 'A';
+    return keyCode >= 32 && keyCode <= 126 ? keyCode : 0;
+}
+
+juce::String shortcutKeyName (int keyCode)
+{
+    if (keyCode == 0)
+        return "-";
+    if (keyCode == juce::KeyPress::spaceKey)
+        return "SPACE";
+    return juce::String::charToString (static_cast<juce::juce_wchar> (keyCode)).toUpperCase();
+}
+
+juce::String serialiseShortcutMap (const ShortcutMap& map)
+{
+    juce::StringArray values;
+    for (const auto key : map.keys)
+        values.add (juce::String (key));
+    return values.joinIntoString (",");
+}
+
+ShortcutMap parseShortcutMap (const juce::String& text)
+{
+    auto result = ShortcutMap::defaults();
+    const auto values = juce::StringArray::fromTokens (text, ",", "");
+    if (values.size() != static_cast<int> (ShortcutMap::actionCount))
+        return result;
+
+    ShortcutMap parsed;
+    for (size_t index = 0; index < parsed.keys.size(); ++index)
+    {
+        if (values[static_cast<int> (index)].isEmpty()
+            || ! values[static_cast<int> (index)].containsOnly ("0123456789"))
+            return result;
+        parsed.keys[index] = values[static_cast<int> (index)].getIntValue();
+    }
+    return parsed.isValid() ? parsed : result;
+}
+
+ShortcutProfiles loadShortcutProfiles (juce::PropertiesFile& settings)
+{
+    auto profiles = defaultShortcutProfiles();
+    const auto schemaVersion = settings.getIntValue (shortcutSchemaVersionKey, 0);
+    if (schemaVersion == 1)
+    {
+        profiles.fill (parseShortcutMap (settings.getValue (shortcutMapKey)));
+        return profiles;
+    }
+    if (schemaVersion != 2)
+        return profiles;
+
+    for (size_t index = 0; index < profiles.size(); ++index)
+        profiles[index] = parseShortcutMap (
+            settings.getValue (shortcutProfileKeyPrefix + juce::String (index)));
+    applySharedShortcutActions (profiles, profiles.front());
+    return profiles;
+}
+
+void saveShortcutProfiles (juce::PropertiesFile& settings, const ShortcutProfiles& profiles)
+{
+    settings.setValue (shortcutSchemaVersionKey, 2);
+    for (size_t index = 0; index < profiles.size(); ++index)
+        settings.setValue (shortcutProfileKeyPrefix + juce::String (index),
+                           serialiseShortcutMap (profiles[index]));
+    settings.saveIfNeeded();
+}
 
 juce::String instrumentStateForLog (const te::AudioTrack& track)
 {
@@ -152,6 +307,38 @@ bool noteIsInScale (int midiNote, int rootIndex, int scaleIndex)
     return std::find (intervals.begin(), intervals.end(), interval) != intervals.end();
 }
 
+juce::Rectangle<int> pianoKeyBounds (juce::Rectangle<int> bounds, size_t index)
+{
+    const auto white = std::find (whiteNoteIndices.begin(), whiteNoteIndices.end(), static_cast<int> (index));
+    if (white != whiteNoteIndices.end())
+    {
+        const auto slot = static_cast<int> (std::distance (whiteNoteIndices.begin(), white));
+        const auto left = bounds.getX() + slot * bounds.getWidth() / static_cast<int> (whiteNoteIndices.size());
+        const auto right = bounds.getX() + (slot + 1) * bounds.getWidth() / static_cast<int> (whiteNoteIndices.size());
+        return { left, bounds.getY(), right - left, bounds.getHeight() };
+    }
+
+    const auto black = std::find (blackNoteIndices.begin(), blackNoteIndices.end(), static_cast<int> (index));
+    if (black == blackNoteIndices.end())
+        return {};
+    const auto slot = blackKeySlots[static_cast<size_t> (std::distance (blackNoteIndices.begin(), black))];
+    const auto whiteWidth = bounds.getWidth() / static_cast<float> (whiteNoteIndices.size());
+    const auto width = juce::roundToInt (whiteWidth * 0.62f);
+    const auto centre = juce::roundToInt (bounds.getX() + (slot + 1) * whiteWidth);
+    return { centre - width / 2, bounds.getY(), width, juce::roundToInt (bounds.getHeight() * 0.62f) };
+}
+
+int pianoKeyAt (juce::Rectangle<int> bounds, juce::Point<float> position)
+{
+    for (const auto index : blackNoteIndices)
+        if (pianoKeyBounds (bounds, static_cast<size_t> (index)).toFloat().contains (position))
+            return index;
+    for (const auto index : whiteNoteIndices)
+        if (pianoKeyBounds (bounds, static_cast<size_t> (index)).toFloat().contains (position))
+            return index;
+    return -1;
+}
+
 struct TimelineNote
 {
     int pitch = 60;
@@ -236,6 +423,146 @@ bool configureDrumSynth (te::FourOscPlugin& synth, int drumIndex)
     synth.state.setProperty ("presetName", drumPresets[static_cast<size_t> (drumIndex)].name, nullptr);
     return true;
 }
+
+struct SynthControls
+{
+    int waveform = 1;
+    float attackSeconds = 0.1f;
+    float releaseSeconds = 0.1f;
+    float cutoffHz = 440.0f;
+    float resonancePercent = 0.0f;
+    float reverbMixPercent = 0.0f;
+};
+
+juce::StringArray synthWaveformNames()
+{
+    return { "Sine", "Square / Pulse", "Saw", "Triangle", "Noise" };
+}
+
+float filterNoteToHz (float note)
+{
+    return 440.0f * std::pow (2.0f, (note - 69.0f) / 12.0f);
+}
+
+float filterHzToNote (float frequency)
+{
+    return 12.0f * std::log2 (juce::jmax (1.0f, frequency) / 440.0f) + 69.0f;
+}
+
+SynthControls readSynthControls (const te::FourOscPlugin& synth)
+{
+    SynthControls result;
+    if (! synth.oscParams.isEmpty())
+        result.waveform = synth.oscParams[0]->waveShapeValue.get();
+    result.attackSeconds = synth.ampAttack->getCurrentValue();
+    result.releaseSeconds = synth.ampRelease->getCurrentValue();
+    result.cutoffHz = filterNoteToHz (synth.filterFreq->getCurrentValue());
+    result.resonancePercent = synth.filterResonance->getCurrentValue();
+    result.reverbMixPercent = synth.reverbMix->getCurrentValue() * 100.0f;
+    return result;
+}
+
+bool applySynthControls (te::FourOscPlugin& synth, SynthControls controls)
+{
+    if (synth.oscParams.isEmpty())
+        return false;
+
+    synth.oscParams[0]->waveShapeValue = juce::jlimit (1, 5, controls.waveform);
+    synth.ampAttack->setParameter (juce::jlimit (0.001f, 60.0f, controls.attackSeconds),
+                                   juce::sendNotificationSync);
+    synth.ampRelease->setParameter (juce::jlimit (0.001f, 60.0f, controls.releaseSeconds),
+                                    juce::sendNotificationSync);
+    synth.filterFreq->setParameter (
+        juce::jlimit (0.0f, 135.076232f, filterHzToNote (controls.cutoffHz)),
+        juce::sendNotificationSync);
+    synth.filterResonance->setParameter (juce::jlimit (0.0f, 100.0f, controls.resonancePercent),
+                                         juce::sendNotificationSync);
+    const auto reverbMix = juce::jlimit (0.0f, 100.0f, controls.reverbMixPercent) / 100.0f;
+    synth.reverbMix->setParameter (reverbMix, juce::sendNotificationSync);
+    synth.reverbOnValue = reverbMix > 0.0f;
+    return true;
+}
+
+class MasterSafetyPlugin final : public te::Plugin
+{
+public:
+    static constexpr auto xmlTypeName = "musicBitMakerMasterSafety";
+    static constexpr float headroomDb = -12.0f;
+    static constexpr float limiterThresholdDb = -0.5f;
+
+    explicit MasterSafetyPlugin (te::PluginCreationInfo info) : Plugin (info) {}
+
+    juce::String getName() const override { return "MusicBitMaker Master Safety"; }
+    juce::String getPluginType() override { return xmlTypeName; }
+    juce::String getSelectableDescription() override { return getName(); }
+    bool shouldMeasureCpuUsage() const noexcept override { return false; }
+
+    void initialise (const te::PluginInitialisationInfo& info) override
+    {
+        limiter.setThreshold (limiterThresholdDb);
+        limiter.setRelease (80.0f);
+        limiter.prepare ({ info.sampleRate, static_cast<juce::uint32> (info.blockSizeSamples), 2 });
+    }
+
+    void deinitialise() override { limiter.reset(); }
+
+    void applyToBuffer (const te::PluginRenderContext& context) override
+    {
+        if (context.destBuffer == nullptr || context.bufferNumSamples <= 0)
+            return;
+
+        SCOPED_REALTIME_CHECK
+
+        const auto channels = juce::jmin (2, context.destBuffer->getNumChannels());
+        if (channels == 0)
+            return;
+
+        float inputPeak = 0.0f;
+        for (int channel = 0; channel < channels; ++channel)
+            inputPeak = juce::jmax (inputPeak, context.destBuffer->getMagnitude (
+                channel, context.bufferStartSample, context.bufferNumSamples));
+
+        auto block = juce::dsp::AudioBlock<float> (*context.destBuffer)
+                         .getSubsetChannelBlock (0, static_cast<size_t> (channels))
+                         .getSubBlock (static_cast<size_t> (context.bufferStartSample),
+                                       static_cast<size_t> (context.bufferNumSamples));
+        block.multiplyBy (juce::Decibels::decibelsToGain (headroomDb));
+
+        const auto limiterThreshold = juce::Decibels::decibelsToGain (limiterThresholdDb);
+        if (inputPeak * juce::Decibels::decibelsToGain (headroomDb) > limiterThreshold)
+            limiterActive.store (true, std::memory_order_relaxed);
+        if (inputPeak > 1.0f)
+            inputOverload.store (true, std::memory_order_relaxed);
+
+        auto processContext = juce::dsp::ProcessContextReplacing<float> (block);
+        limiter.process (processContext);
+
+        float outputPeak = 0.0f;
+        for (int channel = 0; channel < channels; ++channel)
+            outputPeak = juce::jmax (outputPeak, context.destBuffer->getMagnitude (
+                channel, context.bufferStartSample, context.bufferNumSamples));
+        publishPeak (outputPeak);
+    }
+
+    float takeOutputPeak() noexcept { return pendingOutputPeak.exchange (0.0f, std::memory_order_relaxed); }
+    bool takeInputOverload() noexcept { return inputOverload.exchange (false, std::memory_order_relaxed); }
+    bool takeLimiterActivity() noexcept { return limiterActive.exchange (false, std::memory_order_relaxed); }
+
+private:
+    void publishPeak (float peak) noexcept
+    {
+        auto previous = pendingOutputPeak.load (std::memory_order_relaxed);
+        while (peak > previous
+               && ! pendingOutputPeak.compare_exchange_weak (
+                   previous, peak, std::memory_order_relaxed, std::memory_order_relaxed))
+        {
+        }
+    }
+
+    juce::dsp::Limiter<float> limiter;
+    std::atomic<float> pendingOutputPeak { 0.0f };
+    std::atomic<bool> inputOverload { false }, limiterActive { false };
+};
 
 class DiagnosticAudioTap final : public te::Plugin
 {
@@ -358,11 +685,13 @@ private:
 class KeyboardPadComponent final : public juce::Component
 {
 public:
-    KeyboardPadComponent (std::function<void (size_t, bool)> noteChangedToUse,
+    KeyboardPadComponent (ShortcutMap& shortcutsToUse,
+                          std::function<void (size_t, bool)> noteChangedToUse,
                           std::function<bool (size_t)> noteIsDownToUse,
                           std::function<void (int, int)> scaleChangedToUse,
                           std::function<void (int)> octaveChangedToUse)
-        : noteChanged (std::move (noteChangedToUse)),
+        : shortcuts (shortcutsToUse),
+          noteChanged (std::move (noteChangedToUse)),
           noteIsDown (std::move (noteIsDownToUse)),
           scaleChanged (std::move (scaleChangedToUse)),
           octaveChanged (std::move (octaveChangedToUse))
@@ -371,7 +700,7 @@ public:
         setSize (1160, 250);
         for (int octave = minimumOctave; octave <= maximumOctave; ++octave)
             octaveBox.addItem ("Octave: " + juce::String (octave), octave + 1);
-        octaveBox.setSelectedId (5, juce::dontSendNotification);
+        octaveBox.setSelectedId (4, juce::dontSendNotification);
         octaveBox.setTitle ("Keyboard octave");
         octaveBox.onChange = [this] { changeOctave (octaveBox.getSelectedId() - 1); };
         addAndMakeVisible (octaveBox);
@@ -431,12 +760,20 @@ public:
         changeOctave (octave, false);
     }
 
+    void shortcutsChanged()
+    {
+        releaseAll();
+        repaint();
+    }
+
     void paint (juce::Graphics& graphics) override
     {
         graphics.fillAll (juce::Colour::fromRGB (20, 23, 31));
         graphics.setColour (juce::Colour::fromRGB (190, 198, 214));
         graphics.setFont (juce::FontOptions (13.0f, juce::Font::bold));
-        graphics.drawText (isEnabled() ? "MOUSE: 3 OCTAVES  |  A-K: FIRST OCTAVE  |  Z/X: SHIFT"
+        graphics.drawText (isEnabled() ? "MOUSE: 3 OCTAVES  |  ASSIGNED KEYS SHOWN  |  OCTAVE: "
+                                             + shortcutKeyName (shortcuts.keys[ShortcutMap::octaveDown]) + "/"
+                                             + shortcutKeyName (shortcuts.keys[ShortcutMap::octaveUp])
                                        : "KEYBOARD DISABLED  |  Select a keyboard track",
                            432, 10, getWidth() - 444, 30, juce::Justification::centredLeft);
 
@@ -448,15 +785,16 @@ public:
 
     bool keyPressed (const juce::KeyPress& key) override
     {
-        const auto character = static_cast<char> (std::toupper (key.getTextCharacter()));
-        if (character == 'Z' || character == 'X')
+        const auto keyCode = canonicalShortcutKey (key);
+        if (keyCode == shortcuts.keys[ShortcutMap::octaveDown]
+            || keyCode == shortcuts.keys[ShortcutMap::octaveUp])
         {
-            if (! key.getModifiers().isAnyModifierKeyDown())
-                changeOctave (currentOctave + (character == 'Z' ? -1 : 1));
+            changeOctave (currentOctave
+                + (keyCode == shortcuts.keys[ShortcutMap::octaveDown] ? -1 : 1));
             return true;
         }
-        for (size_t index = 0; index < keyChars.size(); ++index)
-            if (character == keyChars[index])
+        for (size_t index = 0; index < ShortcutMap::pianoCount; ++index)
+            if (keyCode != 0 && keyCode == shortcuts.keys[index])
             {
                 keyboardDown[index] = true;
                 updateNote (index);
@@ -467,9 +805,10 @@ public:
 
     bool keyStateChanged (bool) override
     {
-        for (size_t index = 0; index < keyChars.size(); ++index)
+        for (size_t index = 0; index < ShortcutMap::pianoCount; ++index)
         {
-            keyboardDown[index] = juce::KeyPress::isKeyCurrentlyDown (std::tolower (keyChars[index]));
+            const auto keyCode = shortcuts.keys[index];
+            keyboardDown[index] = keyCode != 0 && juce::KeyPress::isKeyCurrentlyDown (keyCode);
             updateNote (index);
         }
         repaint();
@@ -521,24 +860,7 @@ private:
 
     juce::Rectangle<int> getKeyBounds (size_t index) const
     {
-        const auto bounds = getKeyArea();
-        const auto white = std::find (whiteNoteIndices.begin(), whiteNoteIndices.end(), static_cast<int> (index));
-        if (white != whiteNoteIndices.end())
-        {
-            const auto slot = static_cast<int> (std::distance (whiteNoteIndices.begin(), white));
-            const auto left = bounds.getX() + slot * bounds.getWidth() / static_cast<int> (whiteNoteIndices.size());
-            const auto right = bounds.getX() + (slot + 1) * bounds.getWidth() / static_cast<int> (whiteNoteIndices.size());
-            return { left, bounds.getY(), right - left, bounds.getHeight() };
-        }
-
-        const auto black = std::find (blackNoteIndices.begin(), blackNoteIndices.end(), static_cast<int> (index));
-        if (black == blackNoteIndices.end())
-            return {};
-        const auto slot = blackKeySlots[static_cast<size_t> (std::distance (blackNoteIndices.begin(), black))];
-        const auto whiteWidth = bounds.getWidth() / static_cast<float> (whiteNoteIndices.size());
-        const auto width = juce::roundToInt (whiteWidth * 0.62f);
-        const auto centre = juce::roundToInt (bounds.getX() + (slot + 1) * whiteWidth);
-        return { centre - width / 2, bounds.getY(), width, juce::roundToInt (bounds.getHeight() * 0.62f) };
+        return pianoKeyBounds (getKeyArea(), index);
     }
 
     void drawKey (juce::Graphics& graphics, size_t index, bool black) const
@@ -566,8 +888,8 @@ private:
         auto labels = key.toNearestInt();
         const auto noteLabel = labels.removeFromBottom (24);
         const auto shortcutLabel = labels.removeFromBottom (28);
-        if (index < keyChars.size())
-            graphics.drawText (juce::String::charToString (keyChars[index]), shortcutLabel, juce::Justification::centred);
+        graphics.drawText (shortcutKeyName (shortcuts.keys[index]), shortcutLabel,
+                           juce::Justification::centred);
         graphics.setFont (juce::FontOptions (black ? 9.0f : 11.0f));
         graphics.drawText (compactPitchLabel (keyboardPitch (index, currentOctave)),
                            noteLabel, juce::Justification::centred);
@@ -575,13 +897,7 @@ private:
 
     int noteAt (juce::Point<float> position) const
     {
-        for (const auto index : blackNoteIndices)
-            if (getKeyBounds (static_cast<size_t> (index)).toFloat().contains (position))
-                return index;
-        for (const auto index : whiteNoteIndices)
-            if (getKeyBounds (static_cast<size_t> (index)).toFloat().contains (position))
-                return index;
-        return -1;
+        return pianoKeyAt (getKeyArea(), position);
     }
 
     void updateNote (size_t index)
@@ -614,12 +930,13 @@ private:
             updateNote (index);
     }
 
+    ShortcutMap& shortcuts;
     std::function<void (size_t, bool)> noteChanged;
     std::function<bool (size_t)> noteIsDown;
     std::function<void (int, int)> scaleChanged;
     std::function<void (int)> octaveChanged;
     juce::ComboBox octaveBox, rootBox, scaleBox;
-    int currentOctave = 4;
+    int currentOctave = 3;
     std::array<bool, midiNotes.size()> keyboardDown {};
     std::array<bool, midiNotes.size()> sentDown {};
     int mouseNote = -1;
@@ -629,7 +946,8 @@ private:
 class KeyboardPadWindow final : public juce::DocumentWindow
 {
 public:
-    KeyboardPadWindow (std::function<void (size_t, bool)> noteChanged,
+    KeyboardPadWindow (ShortcutMap& shortcuts,
+                       std::function<void (size_t, bool)> noteChanged,
                        std::function<bool (size_t)> noteIsDown,
                        std::function<void (int, int)> scaleChanged,
                        std::function<void (int)> octaveChanged,
@@ -641,7 +959,7 @@ public:
         setUsingNativeTitleBar (true);
         setResizable (true, false);
         setResizeLimits (900, 220, 1600, 420);
-        pad = new KeyboardPadComponent (std::move (noteChanged), std::move (noteIsDown),
+        pad = new KeyboardPadComponent (shortcuts, std::move (noteChanged), std::move (noteIsDown),
                                         std::move (scaleChanged), std::move (octaveChanged));
         setContentOwned (pad, true);
         centreWithSize (1160, 280);
@@ -661,6 +979,8 @@ public:
         pad->repaint();
     }
 
+    void shortcutsChanged() { pad->shortcutsChanged(); }
+
     void setOctave (int octave) { pad->setOctave (octave); }
 
     void setScale (int rootIndex, int scaleIndex)
@@ -677,6 +997,355 @@ public:
 
 private:
     KeyboardPadComponent* pad = nullptr;
+    std::function<void()> closed;
+};
+
+class ShortcutEditorComponent final : public juce::Component
+{
+public:
+    ShortcutEditorComponent (ShortcutProfiles initialProfiles,
+                             int initialRootIndex,
+                             int initialScaleIndex,
+                             std::function<void (const ShortcutProfiles&)> appliedToUse,
+                             std::function<void()> closedToUse)
+        : workingProfiles (std::move (initialProfiles)), applied (std::move (appliedToUse)),
+          closed (std::move (closedToUse))
+    {
+        setWantsKeyboardFocus (true);
+        setSize (1050, 590);
+        for (size_t i = 0; i < rootNames.size(); ++i)
+            rootBox.addItem ("Root: " + juce::String (rootNames[i]), static_cast<int> (i + 1));
+        for (size_t i = 0; i < scaleNames.size(); ++i)
+            scaleBox.addItem ("Scale: " + juce::String (scaleNames[i]), static_cast<int> (i + 1));
+        rootBox.onChange = scaleBox.onChange = [this]
+        {
+            if (updatingProfile)
+                return;
+            selectedProfile = shortcutProfileIndex (rootBox.getSelectedId() - 1,
+                                                     scaleBox.getSelectedId() - 1);
+            waitingForKey = false;
+            status = "Editing " + profileName();
+            repaint();
+        };
+        for (auto* box : { &rootBox, &scaleBox })
+        {
+            box->setWantsKeyboardFocus (false);
+            addAndMakeVisible (*box);
+        }
+        selectProfile (initialRootIndex, initialScaleIndex);
+        assignButton.onClick = [this]
+        {
+            waitingForKey = true;
+            status = "Press one key (Esc cancels capture)";
+            grabKeyboardFocus();
+            repaint();
+        };
+        clearButton.onClick = [this]
+        {
+            currentMap().keys[static_cast<size_t> (selectedAction)] = 0;
+            if (selectedAction >= static_cast<int> (ShortcutMap::drumBase))
+                applySharedShortcutActions (workingProfiles, currentMap());
+            waitingForKey = false;
+            status = "Shortcut cleared";
+            repaint();
+        };
+        resetButton.onClick = [this]
+        {
+            const auto defaults = ShortcutMap::defaults();
+            std::copy (defaults.keys.begin(), defaults.keys.begin() + ShortcutMap::pianoCount,
+                       currentMap().keys.begin());
+            applySharedShortcutActions (workingProfiles, currentMap());
+            waitingForKey = false;
+            status = profileName() + " piano defaults restored in this preview";
+            repaint();
+        };
+        applyButton.onClick = [this]
+        {
+            if (std::any_of (workingProfiles.begin(), workingProfiles.end(),
+                             [] (const auto& profile) { return ! profile.isValid(); }))
+            {
+                status = "Resolve shortcut conflicts before applying";
+                repaint();
+                return;
+            }
+            applied (workingProfiles);
+            closed();
+        };
+        cancelButton.onClick = [this] { closed(); };
+
+        for (auto* button : { &assignButton, &clearButton, &resetButton, &applyButton, &cancelButton })
+        {
+            button->setMouseClickGrabsKeyboardFocus (false);
+            addAndMakeVisible (*button);
+        }
+    }
+
+    void setShortcutProfiles (const ShortcutProfiles& profiles, int rootIndex, int scaleIndex)
+    {
+        workingProfiles = profiles;
+        selectProfile (rootIndex, scaleIndex);
+        waitingForKey = false;
+        status.clear();
+        selectedAction = 12;
+        repaint();
+    }
+
+    void resized() override
+    {
+        rootBox.setBounds (20, 68, 130, 28);
+        scaleBox.setBounds (158, 68, 170, 28);
+        auto buttons = getLocalBounds().removeFromBottom (54).reduced (20, 8);
+        assignButton.setBounds (buttons.removeFromLeft (150).reduced (3));
+        clearButton.setBounds (buttons.removeFromLeft (100).reduced (3));
+        resetButton.setBounds (buttons.removeFromLeft (145).reduced (3));
+        cancelButton.setBounds (buttons.removeFromRight (100).reduced (3));
+        applyButton.setBounds (buttons.removeFromRight (100).reduced (3));
+    }
+
+    void paint (juce::Graphics& graphics) override
+    {
+        graphics.fillAll (juce::Colour::fromRGB (20, 23, 31));
+        graphics.setColour (juce::Colours::white);
+        graphics.setFont (juce::FontOptions (24.0f, juce::Font::bold));
+        graphics.drawText ("Performance Shortcuts", 20, 14, getWidth() - 40, 30,
+                           juce::Justification::centredLeft);
+        graphics.setColour (juce::Colour::fromRGB (151, 160, 180));
+        graphics.setFont (juce::FontOptions (12.0f));
+        graphics.drawText ("Piano keys are saved per Root + Scale. Drums and octave controls are shared.",
+                           20, 44, getWidth() - 40, 20, juce::Justification::centredLeft);
+
+        for (const auto index : whiteNoteIndices)
+            drawPianoKey (graphics, static_cast<size_t> (index), false);
+        for (const auto index : blackNoteIndices)
+            drawPianoKey (graphics, static_cast<size_t> (index), true);
+
+        constexpr std::array<const char*, 7> names {
+            "Kick", "Snare", "Closed Hat", "Open Hat", "Kick Alternate", "Octave Down", "Octave Up"
+        };
+        for (size_t index = 0; index < names.size(); ++index)
+        {
+            const auto action = static_cast<int> (ShortcutMap::drumBase + index);
+            auto bounds = extraActionBounds (action);
+            graphics.setColour (action == selectedAction ? juce::Colour::fromRGB (59, 91, 105)
+                                                          : juce::Colour::fromRGB (30, 35, 47));
+            graphics.fillRoundedRectangle (bounds.toFloat(), 6.0f);
+            graphics.setColour (action == selectedAction ? juce::Colour::fromRGB (105, 225, 180)
+                                                          : juce::Colour::fromRGB (89, 98, 118));
+            graphics.drawRoundedRectangle (bounds.toFloat(), 6.0f, action == selectedAction ? 2.0f : 1.0f);
+            graphics.setFont (juce::FontOptions (12.0f, juce::Font::bold));
+            graphics.drawText (names[index], bounds.removeFromTop (24), juce::Justification::centred);
+            graphics.setFont (juce::FontOptions (18.0f, juce::Font::bold));
+            graphics.drawText (shortcutKeyName (currentMap().keys[static_cast<size_t> (action)]), bounds,
+                               juce::Justification::centred);
+        }
+
+        graphics.setColour (juce::Colour::fromRGB (190, 198, 214));
+        graphics.setFont (juce::FontOptions (14.0f, juce::Font::bold));
+        graphics.drawText ("Selected: " + actionName (selectedAction)
+                               + "   Current: "
+                               + shortcutKeyName (currentMap().keys[static_cast<size_t> (selectedAction)]),
+                           20, 470, getWidth() - 40, 24, juce::Justification::centredLeft);
+        graphics.setColour (waitingForKey ? juce::Colour::fromRGB (255, 201, 85)
+                                          : juce::Colour::fromRGB (151, 160, 180));
+        graphics.setFont (juce::FontOptions (12.0f));
+        graphics.drawText (status.isNotEmpty() ? status : "Unassigned keys remain playable with the mouse.",
+                           20, 494, getWidth() - 40, 22, juce::Justification::centredLeft);
+    }
+
+    void mouseDown (const juce::MouseEvent& event) override
+    {
+        if (const auto piano = pianoKeyAt (pianoBounds(), event.position); piano >= 0)
+        {
+            selectedAction = piano;
+            waitingForKey = false;
+            status.clear();
+            repaint();
+            return;
+        }
+        for (int action = static_cast<int> (ShortcutMap::drumBase);
+             action < static_cast<int> (ShortcutMap::actionCount); ++action)
+        {
+            if (extraActionBounds (action).contains (event.getPosition()))
+            {
+                selectedAction = action;
+                waitingForKey = false;
+                status.clear();
+                repaint();
+                return;
+            }
+        }
+    }
+
+    bool keyPressed (const juce::KeyPress& key) override
+    {
+        if (! waitingForKey)
+            return false;
+        if (key.getKeyCode() == juce::KeyPress::escapeKey)
+        {
+            waitingForKey = false;
+            status = "Key capture cancelled";
+            repaint();
+            return true;
+        }
+
+        const auto keyCode = canonicalShortcutKey (key);
+        if (keyCode == 0)
+        {
+            status = "Use one printable key without Ctrl, Alt, or Shift";
+            repaint();
+            return true;
+        }
+
+        if (const auto existing = currentMap().actionForKey (keyCode);
+            existing >= 0 && existing != selectedAction)
+        {
+            if (! juce::AlertWindow::showOkCancelBox (
+                    juce::AlertWindow::QuestionIcon, "Shortcut conflict",
+                    shortcutKeyName (keyCode) + " is assigned to " + actionName (existing)
+                        + ". Replace that assignment?",
+                    "Replace", "Cancel"))
+                return true;
+            if (existing >= static_cast<int> (ShortcutMap::drumBase))
+                for (auto& profile : workingProfiles)
+                    profile.keys[static_cast<size_t> (existing)] = 0;
+            else
+                currentMap().keys[static_cast<size_t> (existing)] = 0;
+        }
+
+        currentMap().keys[static_cast<size_t> (selectedAction)] = keyCode;
+        if (selectedAction >= static_cast<int> (ShortcutMap::drumBase))
+            applySharedShortcutActions (workingProfiles, currentMap());
+        waitingForKey = false;
+        status = actionName (selectedAction) + " = " + shortcutKeyName (keyCode);
+        repaint();
+        return true;
+    }
+
+private:
+    juce::Rectangle<int> pianoBounds() const
+    {
+        return { 20, 104, getWidth() - 40, 215 };
+    }
+
+    juce::Rectangle<int> extraActionBounds (int action) const
+    {
+        const auto index = action - static_cast<int> (ShortcutMap::drumBase);
+        if (index < 4)
+        {
+            const auto width = (getWidth() - 52) / 4;
+            return { 20 + index * (width + 4), 334, width, 62 };
+        }
+        const auto width = (getWidth() - 48) / 3;
+        return { 20 + (index - 4) * (width + 4), 404, width, 58 };
+    }
+
+    juce::String actionName (int action) const
+    {
+        if (action >= 0 && action < static_cast<int> (ShortcutMap::pianoCount))
+            return compactPitchLabel (keyboardPitch (static_cast<size_t> (action), 3)) + " piano";
+        constexpr std::array<const char*, 7> names {
+            "Kick", "Snare", "Closed Hat", "Open Hat", "Kick Alternate", "Octave Down", "Octave Up"
+        };
+        const auto index = action - static_cast<int> (ShortcutMap::drumBase);
+        return juce::isPositiveAndBelow (index, static_cast<int> (names.size())) ? names[static_cast<size_t> (index)]
+                                                                                : juce::String ("Unknown");
+    }
+
+    void drawPianoKey (juce::Graphics& graphics, size_t index, bool black)
+    {
+        auto bounds = pianoKeyBounds (pianoBounds(), index).toFloat().reduced (black ? 1.0f : 2.0f);
+        const auto root = static_cast<int> (selectedProfile % rootNames.size());
+        const auto scale = static_cast<int> (selectedProfile / rootNames.size());
+        const auto inScale = noteIsInScale (keyboardPitch (index, 3), root, scale);
+        graphics.setColour (black ? (inScale ? juce::Colour::fromRGB (46, 116, 105)
+                                             : juce::Colour::fromRGB (36, 40, 50))
+                                  : (inScale ? juce::Colour::fromRGB (196, 245, 224)
+                                             : juce::Colour::fromRGB (239, 241, 246)));
+        graphics.fillRoundedRectangle (bounds, black ? 4.0f : 6.0f);
+        graphics.setColour (static_cast<int> (index) == selectedAction
+                                ? juce::Colour::fromRGB (105, 225, 180)
+                                : juce::Colour::fromRGB (72, 80, 99));
+        graphics.drawRoundedRectangle (bounds, black ? 4.0f : 6.0f,
+                                       static_cast<int> (index) == selectedAction ? 3.0f : 1.0f);
+        graphics.setColour (black ? juce::Colours::white : juce::Colour::fromRGB (46, 51, 64));
+        graphics.setFont (juce::FontOptions (black ? 11.0f : 13.0f, juce::Font::bold));
+        auto labels = bounds.toNearestInt();
+        graphics.drawText (shortcutKeyName (currentMap().keys[index]), labels.removeFromBottom (28),
+                           juce::Justification::centred);
+        graphics.setFont (juce::FontOptions (black ? 8.0f : 10.0f));
+        graphics.drawText (compactPitchLabel (keyboardPitch (index, 3)), labels.removeFromBottom (20),
+                           juce::Justification::centred);
+    }
+
+    ShortcutMap& currentMap() { return workingProfiles[selectedProfile]; }
+    const ShortcutMap& currentMap() const { return workingProfiles[selectedProfile]; }
+
+    juce::String profileName() const
+    {
+        return juce::String (rootNames[selectedProfile % rootNames.size()]) + " "
+             + scaleNames[selectedProfile / rootNames.size()];
+    }
+
+    void selectProfile (int rootIndex, int scaleIndex)
+    {
+        juce::ScopedValueSetter<bool> guard (updatingProfile, true);
+        const auto root = juce::jlimit (0, 11, rootIndex);
+        const auto scale = juce::jlimit (0, 1, scaleIndex);
+        selectedProfile = shortcutProfileIndex (root, scale);
+        rootBox.setSelectedId (root + 1, juce::dontSendNotification);
+        scaleBox.setSelectedId (scale + 1, juce::dontSendNotification);
+    }
+
+    ShortcutProfiles workingProfiles;
+    std::function<void (const ShortcutProfiles&)> applied;
+    std::function<void()> closed;
+    juce::ComboBox rootBox, scaleBox;
+    juce::TextButton assignButton { "ASSIGN KEY" }, clearButton { "CLEAR" };
+    juce::TextButton resetButton { "RESTORE DEFAULTS" }, applyButton { "APPLY" }, cancelButton { "CANCEL" };
+    juce::String status;
+    size_t selectedProfile = 0;
+    int selectedAction = 12;
+    bool waitingForKey = false, updatingProfile = false;
+};
+
+class ShortcutEditorWindow final : public juce::DocumentWindow
+{
+public:
+    ShortcutEditorWindow (const ShortcutProfiles& profiles,
+                          int rootIndex,
+                          int scaleIndex,
+                          std::function<void (const ShortcutProfiles&)> applied,
+                          std::function<void()> closedToUse)
+        : DocumentWindow ("Performance Shortcuts", juce::Colour::fromRGB (20, 23, 31),
+                          minimiseButton | closeButton),
+          closed (std::move (closedToUse))
+    {
+        setUsingNativeTitleBar (true);
+        setResizable (false, false);
+        editor = new ShortcutEditorComponent (profiles, rootIndex, scaleIndex,
+                                              std::move (applied), [this] { closeButtonPressed(); });
+        setContentOwned (editor, true);
+        centreWithSize (1050, 620);
+        setAlwaysOnTop (true);
+    }
+
+    void show (const ShortcutProfiles& profiles, int rootIndex, int scaleIndex)
+    {
+        editor->setShortcutProfiles (profiles, rootIndex, scaleIndex);
+        setMinimised (false);
+        setVisible (true);
+        toFront (true);
+        editor->grabKeyboardFocus();
+    }
+
+    void closeButtonPressed() override
+    {
+        setVisible (false);
+        closed();
+    }
+
+private:
+    ShortcutEditorComponent* editor = nullptr;
     std::function<void()> closed;
 };
 
@@ -699,6 +1368,11 @@ public:
         settingsOptions.folderName = "MusicBitMaker";
         settingsOptions.osxLibrarySubFolder = "Application Support";
         appProperties.setStorageParameters (settingsOptions);
+        if (auto* settings = appProperties.getUserSettings())
+        {
+            shortcutProfiles = loadShortcutProfiles (*settings);
+            shortcutMap = shortcutProfiles.front();
+        }
 
         instrumentLog.reset (juce::FileLogger::createDefaultAppLogger (
             "MusicBitMaker", "instrument-diagnostic.log",
@@ -791,6 +1465,7 @@ public:
         }
 
         keyboardWindow = std::make_unique<KeyboardPadWindow> (
+            shortcutMap,
             [this] (size_t index, bool down)
             {
                 keyboardNotesDown[index] = down;
@@ -801,6 +1476,7 @@ public:
             {
                 edit->state.setProperty (scaleRootProperty, rootIndex, nullptr);
                 edit->state.setProperty (scaleTypeProperty, scaleIndex, nullptr);
+                activateShortcutProfile (rootIndex, scaleIndex);
                 statusMessage = juce::String (rootNames[static_cast<size_t> (rootIndex)])
                               + " " + scaleNames[static_cast<size_t> (scaleIndex)];
                 repaint();
@@ -811,13 +1487,25 @@ public:
                 repaint();
             },
             [this] { menuItemsChanged(); });
+        shortcutEditorWindow = std::make_unique<ShortcutEditorWindow> (
+            shortcutProfiles, scaleRoot(), scaleType(),
+            [this] (const ShortcutProfiles& profiles) { applyShortcutProfiles (profiles); },
+            [this]
+            {
+                if (keyboardWindow != nullptr)
+                    keyboardWindow->setAlwaysOnTop (true);
+                syncKeyboardWindow();
+                menuItemsChanged();
+                grabKeyboardFocus();
+            });
+        updateShortcutLabels();
         syncTrackControls();
         startTimerHz (30);
     }
 
     juce::StringArray getMenuBarNames() override
     {
-        return { "File", "View" };
+        return { "File", "Edit", "View" };
     }
 
     juce::PopupMenu getMenuForIndex (int topLevelMenuIndex, const juce::String&) override
@@ -831,6 +1519,10 @@ public:
             menu.addItem (saveAsMenuId, "Save As...\tCtrl+Shift+S");
             menu.addSeparator();
             menu.addItem (loadMenuId, "Load...\tCtrl+O");
+        }
+        else if (topLevelMenuIndex == 1)
+        {
+            menu.addItem (shortcutsMenuId, "Shortcuts...");
         }
         else
         {
@@ -847,6 +1539,7 @@ public:
         else if (menuItemId == saveMenuId) saveProject();
         else if (menuItemId == saveAsMenuId) saveProjectAs();
         else if (menuItemId == loadMenuId) chooseProjectToLoad();
+        else if (menuItemId == shortcutsMenuId) showShortcutEditor();
         else if (menuItemId == keyboardPadMenuId) toggleKeyboardWindow();
         else if (menuItemId == instrumentLogMenuId && instrumentLog != nullptr)
             instrumentLog->getLogFile().revealToUser();
@@ -855,6 +1548,7 @@ public:
     ~MainComponent() override
     {
         stopTimer();
+        shortcutEditorWindow.reset();
         keyboardWindow.reset();
         releaseAllLiveNotes();
         edit->getTransport().stop (false, false);
@@ -868,6 +1562,7 @@ public:
         graphics.drawText ("MusicBitMaker " JUCE_APPLICATION_VERSION_STRING,
                            30, 26, getWidth() - 60, 34, juce::Justification::centredLeft);
         drawStatus (graphics);
+        drawMasterMeter (graphics);
         drawTrackManager (graphics);
         drawTimeline (graphics);
     }
@@ -927,9 +1622,17 @@ public:
             return true;
         }
 
-        for (size_t index = 0; index < keyChars.size(); ++index)
+        const auto keyCode = canonicalShortcutKey (key);
+        if (keyCode == shortcutMap.keys[ShortcutMap::octaveDown]
+            || keyCode == shortcutMap.keys[ShortcutMap::octaveUp])
         {
-            if (character == keyChars[index])
+            changeKeyboardOctave (keyCode == shortcutMap.keys[ShortcutMap::octaveDown] ? -1 : 1);
+            return true;
+        }
+
+        for (size_t index = 0; index < ShortcutMap::pianoCount; ++index)
+        {
+            if (keyCode != 0 && keyCode == shortcutMap.keys[index])
             {
                 keyboardNotesDown[index] = true;
                 updateCombinedLiveNote (index, "main-keyboard");
@@ -937,21 +1640,22 @@ public:
             }
         }
 
-        constexpr std::array<char, 4> drumKeys { 'Z', 'X', 'C', 'V' };
-        for (size_t index = 0; index < drumKeys.size(); ++index)
+        for (size_t index = 0; index < 4; ++index)
         {
-            if (character == drumKeys[index])
+            if (keyCode != 0 && keyCode == shortcutMap.keys[ShortcutMap::drumBase + index])
             {
-                triggerDrum (static_cast<int> (index), true);
+                if (! drumKeysDown[index])
+                    triggerDrum (static_cast<int> (index), true);
+                drumKeysDown[index] = true;
                 return true;
             }
         }
 
-        if (key == juce::KeyPress::spaceKey)
+        if (keyCode != 0 && keyCode == shortcutMap.keys[ShortcutMap::kickAlternate])
         {
-            if (! spaceWasDown)
+            if (! drumKeysDown[4])
                 triggerDrum (0, true);
-            spaceWasDown = true;
+            drumKeysDown[4] = true;
             return true;
         }
         return false;
@@ -959,12 +1663,19 @@ public:
 
     bool keyStateChanged (bool) override
     {
-        for (size_t index = 0; index < keyChars.size(); ++index)
+        for (size_t index = 0; index < ShortcutMap::pianoCount; ++index)
         {
-            keyboardNotesDown[index] = juce::KeyPress::isKeyCurrentlyDown (std::tolower (keyChars[index]));
+            const auto keyCode = shortcutMap.keys[index];
+            keyboardNotesDown[index] = keyCode != 0 && juce::KeyPress::isKeyCurrentlyDown (keyCode);
             updateCombinedLiveNote (index, "main-key-state");
         }
-        spaceWasDown = juce::KeyPress::isKeyCurrentlyDown (juce::KeyPress::spaceKey);
+        for (size_t index = 0; index < drumKeysDown.size(); ++index)
+        {
+            const auto action = index < 4 ? ShortcutMap::drumBase + index : ShortcutMap::kickAlternate;
+            const auto keyCode = shortcutMap.keys[action];
+            if (keyCode == 0 || ! juce::KeyPress::isKeyCurrentlyDown (keyCode))
+                drumKeysDown[index] = false;
+        }
         repaint();
         return true;
     }
@@ -1076,6 +1787,7 @@ private:
         saveMenuId,
         saveAsMenuId,
         loadMenuId,
+        shortcutsMenuId,
         keyboardPadMenuId,
         instrumentLogMenuId
     };
@@ -1265,6 +1977,23 @@ private:
         }
     }
 
+    MasterSafetyPlugin* masterSafety() const
+    {
+        return edit->getMasterPluginList().findFirstPluginOfType<MasterSafetyPlugin>();
+    }
+
+    void ensureMasterSafety()
+    {
+        if (masterSafety() != nullptr)
+            return;
+
+        auto plugin = edit->getPluginCache().createNewPlugin (MasterSafetyPlugin::xmlTypeName, {});
+        if (dynamic_cast<MasterSafetyPlugin*> (plugin.get()) != nullptr)
+            edit->getMasterPluginList().insertPlugin (plugin, 0, nullptr);
+        else
+            logInstrumentEvent ("master-safety-install-failed");
+    }
+
     void ensureDrumTracks()
     {
         for (int drumIndex = 0; drumIndex < static_cast<int> (drumPresets.size()); ++drumIndex)
@@ -1288,9 +2017,10 @@ private:
 
     void initialiseEdit (bool addDefaultDrums = false)
     {
-        const auto storedOctave = static_cast<int> (edit->state.getProperty (octaveProperty, 4));
+        const auto defaultOctave = addDefaultDrums ? 3 : 4;
+        const auto storedOctave = static_cast<int> (edit->state.getProperty (octaveProperty, defaultOctave));
         const auto usableOctave = juce::jlimit (minimumOctave, maximumOctave, storedOctave);
-        if (storedOctave != usableOctave)
+        if (! edit->state.hasProperty (octaveProperty) || storedOctave != usableOctave)
             edit->state.setProperty (octaveProperty, usableOctave, nullptr);
         if (addDefaultDrums)
         {
@@ -1309,6 +2039,7 @@ private:
             ensureDiagnosticAudioTaps (*track);
             routeTrackToAudioOutput (*track);
         }
+        ensureMasterSafety();
         ensureMasterDiagnosticAudioTap();
         selectedTrackIndex = tracks.isEmpty()
                            ? -1
@@ -1549,11 +2280,72 @@ private:
         grabKeyboardFocus();
     }
 
+    void showSelectedTrackSoundControls()
+    {
+        auto* track = selectedTrack();
+        auto* synth = track != nullptr ? findInstrument (*track) : nullptr;
+        if (synth == nullptr)
+            return;
+
+        const auto current = readSynthControls (*synth);
+        juce::AlertWindow dialog (
+            "Sound Controls", "Attack fades the sound in. Release lets it fade after key-up.\n"
+                              "Cutoff changes brightness; Resonance emphasises the cutoff.\n"
+                              "Reverb Mix blends the dry sound with room-like reflections.",
+            juce::MessageBoxIconType::NoIcon);
+        dialog.addComboBox ("waveform", synthWaveformNames(), "Oscillator 1 waveform");
+        if (auto* combo = dialog.getComboBoxComponent ("waveform"))
+            combo->setSelectedItemIndex (juce::jlimit (1, 5, current.waveform) - 1,
+                                         juce::dontSendNotification);
+        dialog.addTextEditor ("attack", juce::String (current.attackSeconds, 3), "Attack (seconds)");
+        dialog.addTextEditor ("release", juce::String (current.releaseSeconds, 3), "Release (seconds)");
+        dialog.addTextEditor ("cutoff", juce::String (current.cutoffHz, 0), "Filter Cutoff (Hz)");
+        dialog.addTextEditor ("resonance", juce::String (current.resonancePercent, 1), "Resonance (%)");
+        dialog.addTextEditor ("reverb", juce::String (current.reverbMixPercent, 1), "Reverb Mix (%)");
+        for (const auto name : { "attack", "release", "cutoff", "resonance", "reverb" })
+            if (auto* editor = dialog.getTextEditor (name))
+                editor->setInputRestrictions (9, "0123456789.");
+        dialog.addButton ("Apply", 1, juce::KeyPress (juce::KeyPress::returnKey));
+        dialog.addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+        if (dialog.runModalLoop() != 1)
+        {
+            grabKeyboardFocus();
+            return;
+        }
+
+        SynthControls changed;
+        if (auto* combo = dialog.getComboBoxComponent ("waveform"))
+            changed.waveform = combo->getSelectedItemIndex() + 1;
+        changed.attackSeconds = dialog.getTextEditorContents ("attack").getFloatValue();
+        changed.releaseSeconds = dialog.getTextEditorContents ("release").getFloatValue();
+        changed.cutoffHz = dialog.getTextEditorContents ("cutoff").getFloatValue();
+        changed.resonancePercent = dialog.getTextEditorContents ("resonance").getFloatValue();
+        changed.reverbMixPercent = dialog.getTextEditorContents ("reverb").getFloatValue();
+
+        finishOpenNotes (currentPosition());
+        releaseAllLiveNotes ("sound-controls-change");
+        if (! applySynthControls (*synth, changed))
+        {
+            statusMessage = "Could not apply sound controls";
+            repaint();
+            return;
+        }
+        edit->getTransport().ensureContextAllocated (true);
+        armAudioCapture (*track, "sound-controls-change");
+        logInstrumentEvent ("sound-controls-applied " + instrumentStateForLog (*track));
+        statusMessage = "Sound controls applied";
+        repaint();
+        grabKeyboardFocus();
+    }
+
     void showTrackContextMenu()
     {
         juce::PopupMenu menu;
+        juce::PopupMenu settingsMenu;
+        settingsMenu.addItem (2, "Change Instrument...");
+        settingsMenu.addItem (4, "Sound Controls...");
         menu.addItem (1, "Rename...");
-        menu.addItem (2, "Change Instrument...");
+        menu.addSubMenu ("Settings", settingsMenu);
         menu.addSeparator();
         menu.addItem (3, "Delete Track", te::getAudioTracks (*edit).size() > 1);
         juce::Component::SafePointer<MainComponent> safeThis (this);
@@ -1564,6 +2356,7 @@ private:
             if (result == 1) safeThis->renameSelectedTrack();
             else if (result == 2) safeThis->changeSelectedTrackInstrument();
             else if (result == 3) safeThis->deleteSelectedTrack();
+            else if (result == 4) safeThis->showSelectedTrackSoundControls();
         });
     }
 
@@ -1594,6 +2387,66 @@ private:
         keyboardWindow->setScale (
             static_cast<int> (edit->state.getProperty (scaleRootProperty, 0)),
             static_cast<int> (edit->state.getProperty (scaleTypeProperty, 0)));
+    }
+
+    void changeKeyboardOctave (int delta)
+    {
+        const auto next = juce::jlimit (minimumOctave, maximumOctave, keyboardOctave() + delta);
+        if (next == keyboardOctave())
+            return;
+        releaseAllLiveNotes ("octave-change");
+        edit->state.setProperty (octaveProperty, next, nullptr);
+        syncKeyboardWindow();
+        statusMessage = "Keyboard octave: " + juce::String (next);
+        repaint();
+    }
+
+    void updateShortcutLabels()
+    {
+        kickButton.setButtonText ("KICK " + shortcutKeyName (shortcutMap.keys[ShortcutMap::drumBase]));
+        snareButton.setButtonText ("SNARE " + shortcutKeyName (shortcutMap.keys[ShortcutMap::drumBase + 1]));
+        closedHatButton.setButtonText ("HAT " + shortcutKeyName (shortcutMap.keys[ShortcutMap::drumBase + 2]));
+        openHatButton.setButtonText ("HAT " + shortcutKeyName (shortcutMap.keys[ShortcutMap::drumBase + 3]));
+    }
+
+    int scaleRoot() const
+    {
+        return juce::jlimit (0, 11, static_cast<int> (edit->state.getProperty (scaleRootProperty, 0)));
+    }
+
+    int scaleType() const
+    {
+        return juce::jlimit (0, 1, static_cast<int> (edit->state.getProperty (scaleTypeProperty, 0)));
+    }
+
+    void activateShortcutProfile (int rootIndex, int scaleIndex)
+    {
+        releaseAllLiveNotes ("shortcut-profile-change");
+        shortcutMap = shortcutProfiles[shortcutProfileIndex (rootIndex, scaleIndex)];
+        if (keyboardWindow != nullptr)
+            keyboardWindow->shortcutsChanged();
+        updateShortcutLabels();
+    }
+
+    void applyShortcutProfiles (const ShortcutProfiles& profiles)
+    {
+        shortcutProfiles = profiles;
+        if (auto* settings = appProperties.getUserSettings())
+            saveShortcutProfiles (*settings, shortcutProfiles);
+        activateShortcutProfile (scaleRoot(), scaleType());
+        statusMessage = "Scale shortcut profiles updated";
+        repaint();
+    }
+
+    void showShortcutEditor()
+    {
+        if (shortcutEditorWindow == nullptr)
+            return;
+        releaseAllLiveNotes ("shortcut-editor-open");
+        if (keyboardWindow != nullptr)
+            keyboardWindow->setAlwaysOnTop (false);
+        shortcutEditorWindow->show (shortcutProfiles, scaleRoot(), scaleType());
+        menuItemsChanged();
     }
 
     void toggleKeyboardWindow()
@@ -1779,6 +2632,7 @@ private:
             return;
         }
         clearAllTracks (*newEdit);
+        newEdit->state.setProperty (octaveProperty, 3, nullptr);
         finishOpenNotes (currentPosition());
         recording = false;
         edit->getTransport().stop (false, false);
@@ -1792,6 +2646,7 @@ private:
         midiClip = nullptr;
         currentProjectFile = file;
         initialiseEdit (false);
+        activateShortcutProfile (scaleRoot(), scaleType());
 
         if (te::EditFileOperations (*edit).save (true, true, false))
         {
@@ -1808,6 +2663,7 @@ private:
             selectedTrackIndex = te::getAudioTracks (*edit).isEmpty() ? -1 : 0;
             midiClip = selectedTrack() != nullptr ? createMidiClip (*selectedTrack()) : nullptr;
             edit->getTransport().ensureContextAllocated (true);
+            activateShortcutProfile (scaleRoot(), scaleType());
             statusMessage = "Could not create project";
         }
 
@@ -1915,6 +2771,7 @@ private:
         selectedNote = nullptr;
         selectedTrackIndex = 0;
         initialiseEdit (false);
+        activateShortcutProfile (scaleRoot(), scaleType());
         currentProjectFile = file;
         statusMessage = "Loaded: " + file.getFileName();
         syncTrackControls();
@@ -2078,7 +2935,7 @@ private:
                                 + " " + instrumentStateForLog (*track));
             track->injectLiveMidiMessage (juce::MidiMessage::allNotesOff (1), {});
         }
-        spaceWasDown = false;
+        drumKeysDown.fill (false);
         repaint();
     }
 
@@ -2096,6 +2953,14 @@ private:
     void timerCallback() override
     {
         drainAudioCapture();
+        if (auto* safety = masterSafety())
+        {
+            masterOutputPeak = juce::jmax (safety->takeOutputPeak(), masterOutputPeak * 0.88f);
+            if (safety->takeInputOverload() || safety->takeLimiterActivity())
+                masterProtectionHold = 30;
+            else if (masterProtectionHold > 0)
+                --masterProtectionHold;
+        }
         const auto isPlaying = edit->getTransport().isPlaying();
         if (lastUiPlaying && ! isPlaying && recording)
         {
@@ -2219,8 +3084,33 @@ private:
         graphics.setColour (juce::Colour::fromRGB (151, 160, 180));
         graphics.setFont (juce::FontOptions (12.0f));
         graphics.drawText (statusMessage.isNotEmpty() ? statusMessage
-                                                       : "Piano A-K | Drums Z/X/C/V | Drag notes to edit",
+                                                       : "Edit > Shortcuts... | Assigned keys are shown on the keyboard",
                            contentLeft, 134, getWidth() - contentLeft - 24, 18, juce::Justification::centredLeft);
+    }
+
+    void drawMasterMeter (juce::Graphics& graphics)
+    {
+        auto bounds = juce::Rectangle<int> (getWidth() - 438, 31, 218, 24);
+        auto label = bounds.removeFromLeft (52);
+        auto protection = bounds.removeFromRight (72);
+        auto meter = bounds.reduced (3, 5);
+        const auto peakDb = juce::Decibels::gainToDecibels (masterOutputPeak, -60.0f);
+        const auto proportion = juce::jmap (juce::jlimit (-60.0f, 0.0f, peakDb),
+                                            -60.0f, 0.0f, 0.0f, 1.0f);
+
+        graphics.setFont (juce::FontOptions (10.0f, juce::Font::bold));
+        graphics.setColour (juce::Colour::fromRGB (151, 160, 180));
+        graphics.drawText ("MASTER", label, juce::Justification::centredLeft);
+        graphics.setColour (juce::Colour::fromRGB (38, 44, 57));
+        graphics.fillRoundedRectangle (meter.toFloat(), 3.0f);
+        graphics.setColour (peakDb > -6.0f ? juce::Colour::fromRGB (255, 201, 85)
+                                           : juce::Colour::fromRGB (105, 225, 180));
+        graphics.fillRoundedRectangle (
+            meter.withWidth (juce::roundToInt (meter.getWidth() * proportion)).toFloat(), 3.0f);
+        graphics.setColour (masterProtectionHold > 0 ? juce::Colour::fromRGB (255, 113, 92)
+                                                      : juce::Colour::fromRGB (105, 225, 180));
+        graphics.drawText (masterProtectionHold > 0 ? "PROTECTED" : "SAFE",
+                           protection, juce::Justification::centredRight);
     }
 
     void drawTrackManager (juce::Graphics& graphics)
@@ -2375,9 +3265,12 @@ private:
 
     te::Engine& engine;
     juce::ApplicationProperties appProperties;
+    ShortcutProfiles shortcutProfiles = defaultShortcutProfiles();
+    ShortcutMap shortcutMap = ShortcutMap::defaults();
     std::unique_ptr<juce::FileLogger> instrumentLog;
     std::unique_ptr<te::Edit> edit;
     std::unique_ptr<KeyboardPadWindow> keyboardWindow;
+    std::unique_ptr<ShortcutEditorWindow> shortcutEditorWindow;
     juce::MenuBarComponent menuBar { this };
     te::MidiClip* midiClip = nullptr;
     juce::TextButton recordButton { "RECORD" }, playButton { "PLAY" }, stopButton { "STOP" };
@@ -2389,6 +3282,7 @@ private:
     juce::ToggleButton muteButton { "MUTE" }, soloButton { "SOLO" };
     std::array<bool, midiNotes.size()> keyboardNotesDown {};
     std::array<bool, midiNotes.size()> liveNotesDown {};
+    std::array<bool, 5> drumKeysDown {};
     std::array<double, midiNotes.size()> recordingStarts = []
     {
         std::array<double, midiNotes.size()> starts {};
@@ -2407,11 +3301,12 @@ private:
     bool draggingNote = false;
     bool draggingPlayhead = false;
     bool resizingNote = false;
-    bool spaceWasDown = false;
     bool recording = false;
     bool lastUiPlaying = false;
     bool updatingTrackControls = false;
     std::uint32_t nextAudioCapture = 0;
+    float masterOutputPeak = 0.0f;
+    int masterProtectionHold = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
 };
@@ -2700,28 +3595,66 @@ int renderSynthDemos()
     return 0;
 }
 
+int runShortcutMapTest()
+{
+    const auto defaults = ShortcutMap::defaults();
+    if (! defaults.isValid() || defaults.actionForKey ('A') != 12
+        || defaults.actionForKey ('Z') != static_cast<int> (ShortcutMap::drumBase)
+        || defaults.actionForKey ('N') != static_cast<int> (ShortcutMap::octaveDown)
+        || std::any_of (defaults.keys.begin(), defaults.keys.begin() + 12,
+                        [] (int key) { return key != 0; }))
+        return 54;
+
+    auto custom = defaults;
+    custom.keys[0] = 'Q';
+    if (parseShortcutMap (serialiseShortcutMap (custom)).keys != custom.keys)
+        return 55;
+
+    custom.keys[1] = 'Q';
+    if (custom.isValid() || parseShortcutMap (serialiseShortcutMap (custom)).keys != defaults.keys)
+        return 56;
+    if (parseShortcutMap (serialiseShortcutMap (defaults).replaceFirstOccurrenceOf ("65", "bad")).keys
+        != defaults.keys)
+        return 57;
+
+    auto profiles = defaultShortcutProfiles();
+    profiles[shortcutProfileIndex (0, 0)].keys[0] = 'Q';
+    profiles[shortcutProfileIndex (9, 1)].keys[0] = 'R';
+    profiles[shortcutProfileIndex (9, 1)].keys[ShortcutMap::drumBase] = 'P';
+    applySharedShortcutActions (profiles, profiles[shortcutProfileIndex (9, 1)]);
+    if (profiles[shortcutProfileIndex (0, 0)].keys[0] != 'Q'
+        || profiles[shortcutProfileIndex (9, 1)].keys[0] != 'R'
+        || profiles[shortcutProfileIndex (0, 0)].keys[ShortcutMap::drumBase] != 'P'
+        || std::any_of (profiles.begin(), profiles.end(),
+                        [] (const auto& profile) { return ! profile.isValid(); }))
+        return 58;
+    return 0;
+}
+
 int runKeyboardOctaveTest()
 {
-    int octave = 4;
+    auto shortcuts = ShortcutMap::defaults();
+    int octave = 3;
     std::vector<int> events;
     KeyboardPadComponent pad (
+        shortcuts,
         [&] (size_t index, bool down) { events.push_back ((down ? 1 : -1) * keyboardPitch (index, octave)); },
         [] (size_t) { return false; }, [] (int, int) {},
         [&] (int value) { octave = value; });
     pad.keyPressed (juce::KeyPress ('A', {}, 'a'));
-    pad.keyPressed (juce::KeyPress ('Z', {}, 'z'));
-    if (octave != 3 || events != std::vector<int> { 60, -60 }) return 27;
+    pad.keyPressed (juce::KeyPress ('N', {}, 'n'));
+    if (octave != 2 || events != std::vector<int> { 60, -60 }) return 27;
     pad.keyPressed (juce::KeyPress ('A', {}, 'a'));
-    pad.keyPressed (juce::KeyPress ('X', {}, 'x'));
-    if (octave != 4 || events != std::vector<int> { 60, -60, 48, -48 }) return 28;
+    pad.keyPressed (juce::KeyPress ('M', {}, 'm'));
+    if (octave != 3 || events != std::vector<int> { 60, -60, 48, -48 }) return 28;
     auto* box = dynamic_cast<juce::ComboBox*> (pad.getChildComponent (0));
     if (box == nullptr) return 29;
     box->setSelectedId (7, juce::sendNotificationSync);
     if (octave != 6 || keyboardPitch (0, octave) != 84 || pitchLabel (84) != "C6"
         || compactPitchLabel (85) != "C#6") return 30;
-    for (int i = 0; i < 12; ++i) pad.keyPressed (juce::KeyPress ('X', {}, 'x'));
+    for (int i = 0; i < 12; ++i) pad.keyPressed (juce::KeyPress ('M', {}, 'm'));
     if (octave != maximumOctave || keyboardPitch (midiNotes.size() - 1, octave) != 119) return 31;
-    for (int i = 0; i < 12; ++i) pad.keyPressed (juce::KeyPress ('Z', {}, 'z'));
+    for (int i = 0; i < 12; ++i) pad.keyPressed (juce::KeyPress ('N', {}, 'n'));
     if (octave != minimumOctave || keyboardPitch (0, octave) != 12
         || keyboardPitch (midiNotes.size() - 1, octave) != 47) return 32;
     const auto nearBottom = [&pad] (size_t index)
@@ -2809,6 +3742,43 @@ int runInstrumentLogTest()
         && contents.contains ("live-midi event=note-on pitch=60 track=") ? 0 : 48;
 }
 
+int runSynthControlsTest()
+{
+    te::Engine engine { "MusicBitMakerSynthControlsTest" };
+    auto edit = te::createEmptyEdit (engine, {});
+    auto plugin = edit->getPluginCache().createNewPlugin (te::FourOscPlugin::xmlTypeName, {});
+    auto* synth = dynamic_cast<te::FourOscPlugin*> (plugin.get());
+    if (synth == nullptr || ! configureSynth (*synth, 0))
+        return 58;
+
+    const SynthControls changed { 4, 0.25f, 0.75f, 3500.0f, 37.0f, 22.0f };
+    if (! applySynthControls (*synth, changed))
+        return 59;
+    const auto applied = readSynthControls (*synth);
+    if (applied.waveform != changed.waveform
+        || std::abs (applied.attackSeconds - changed.attackSeconds) > 0.001f
+        || std::abs (applied.releaseSeconds - changed.releaseSeconds) > 0.001f
+        || std::abs (applied.cutoffHz - changed.cutoffHz) > 1.0f
+        || std::abs (applied.resonancePercent - changed.resonancePercent) > 0.001f
+        || std::abs (applied.reverbMixPercent - changed.reverbMixPercent) > 0.001f
+        || ! synth->reverbOnValue.get())
+        return 60;
+
+    auto restoredPlugin = edit->getPluginCache().createNewPlugin (te::FourOscPlugin::xmlTypeName, {});
+    auto* restoredSynth = dynamic_cast<te::FourOscPlugin*> (restoredPlugin.get());
+    if (restoredSynth == nullptr)
+        return 61;
+    restoredSynth->restorePluginStateFromValueTree (synth->state.createCopy());
+    const auto restored = readSynthControls (*restoredSynth);
+    return restored.waveform == changed.waveform
+        && std::abs (restored.attackSeconds - changed.attackSeconds) <= 0.001f
+        && std::abs (restored.releaseSeconds - changed.releaseSeconds) <= 0.001f
+        && std::abs (restored.cutoffHz - changed.cutoffHz) <= 1.0f
+        && std::abs (restored.resonancePercent - changed.resonancePercent) <= 0.001f
+        && std::abs (restored.reverbMixPercent - changed.reverbMixPercent) <= 0.001f
+        && restoredSynth->reverbOnValue.get() ? 0 : 62;
+}
+
 int runAudioTapTest()
 {
     te::Engine engine { "MusicBitMakerAudioTapTest" };
@@ -2847,16 +3817,57 @@ int runAudioTapTest()
         && silent.peak == 0.0f && sounding.hash != silent.hash ? 0 : 51;
 }
 
+int runMasterSafetyTest()
+{
+    te::Engine engine { "MusicBitMakerMasterSafetyTest" };
+    engine.getPluginManager().createBuiltInType<MasterSafetyPlugin>();
+    auto edit = te::createEmptyEdit (engine, {});
+    auto plugin = edit->getPluginCache().createNewPlugin (MasterSafetyPlugin::xmlTypeName, {});
+    auto* safety = dynamic_cast<MasterSafetyPlugin*> (plugin.get());
+    if (safety == nullptr)
+        return 52;
+
+    constexpr int frames = 512;
+    juce::AudioBuffer<float> buffer (2, frames);
+    for (int channel = 0; channel < buffer.getNumChannels(); ++channel)
+        for (int frame = 0; frame < frames; ++frame)
+            buffer.setSample (channel, frame, frame % 2 == 0 ? 1.74f : -1.74f);
+
+    safety->initialise ({ tracktion::TimePosition::fromSeconds (0.0), 44100.0, frames });
+    const auto context = te::PluginRenderContext (
+        &buffer, juce::AudioChannelSet::stereo(), 0, frames, nullptr, 0.0,
+        { tracktion::TimePosition::fromSeconds (0.0),
+          tracktion::TimeDuration::fromSeconds (frames / 44100.0) },
+        false, false, false, false);
+    safety->applyToBuffer (context);
+
+    float peak = 0.0f;
+    for (int channel = 0; channel < buffer.getNumChannels(); ++channel)
+        peak = juce::jmax (peak, buffer.getMagnitude (channel, 0, frames));
+    const auto meteredPeak = safety->takeOutputPeak();
+    const auto overloaded = safety->takeInputOverload();
+    safety->deinitialise();
+
+    return overloaded && peak > 0.05f && peak <= 1.0f
+        && std::abs (meteredPeak - peak) < 0.0001f ? 0 : 53;
+}
+
 int runSelfTest()
 {
+    if (const auto shortcuts = runShortcutMapTest(); shortcuts != 0)
+        return shortcuts;
     if (const auto octaveTest = runKeyboardOctaveTest(); octaveTest != 0)
         return octaveTest;
+    if (const auto synthControls = runSynthControlsTest(); synthControls != 0)
+        return synthControls;
     if (const auto emptyProject = runEmptyProjectTest(); emptyProject != 0)
         return emptyProject;
     if (const auto instrumentLog = runInstrumentLogTest(); instrumentLog != 0)
         return instrumentLog;
     if (const auto audioTap = runAudioTapTest(); audioTap != 0)
         return audioTap;
+    if (const auto masterSafety = runMasterSafetyTest(); masterSafety != 0)
+        return masterSafety;
     const auto scalesWork = noteIsInScale (60, 0, 0)
                          && ! noteIsInScale (61, 0, 0)
                          && noteIsInScale (63, 0, 1)
@@ -2904,15 +3915,33 @@ public:
             quit();
             return;
         }
+        if (commandLine.contains ("--self-test-shortcuts"))
+        {
+            setApplicationReturnValue (runShortcutMapTest());
+            quit();
+            return;
+        }
         if (commandLine.contains ("--self-test-instrument-log"))
         {
             setApplicationReturnValue (runInstrumentLogTest());
             quit();
             return;
         }
+        if (commandLine.contains ("--self-test-synth-controls"))
+        {
+            setApplicationReturnValue (runSynthControlsTest());
+            quit();
+            return;
+        }
         if (commandLine.contains ("--self-test-audio-tap"))
         {
             setApplicationReturnValue (runAudioTapTest());
+            quit();
+            return;
+        }
+        if (commandLine.contains ("--self-test-master-safety"))
+        {
+            setApplicationReturnValue (runMasterSafetyTest());
             quit();
             return;
         }
@@ -2929,6 +3958,7 @@ public:
             return;
         }
         engine = std::make_unique<te::Engine> (getApplicationName());
+        engine->getPluginManager().createBuiltInType<MasterSafetyPlugin>();
         engine->getPluginManager().createBuiltInType<DiagnosticAudioTap>();
         mainWindow = std::make_unique<MainWindow> (getApplicationName() + " " + getApplicationVersion(), *engine);
     }

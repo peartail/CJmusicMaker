@@ -38,7 +38,7 @@ MusicBitMaker 앱에서 트랙의 Instrument를 변경해도 실제 소리가 �
 2. 새 프로젝트에 Generated Keys 트랙 하나를 추가한다. Volume/Pan은 고정하고 Mute/Solo 영향을 제거한다.
 3. 건반 Octave 4에서 C4를 연주해 기준 소리를 확인한다.
 4. 짧은 MIDI 패턴을 녹음한 뒤 정지한다.
-5. 트랙 우클릭 → `Change Instrument...` → `8-Bit Lead`를 선택한다.
+5. 트랙 우클릭 → `Settings` → `Change Instrument...` → `8-Bit Lead`를 선택한다.
 6. 같은 C4 직접 연주와 기존 MIDI 패턴 재생을 각각 확인한다. 악기 이름 표시와 실제 소리를 따로 기록한다.
 7. `Cosmic Pad`로 바꿔 어택·릴리스 차이를 확인하고 Generated Keys로 되돌린다.
 8. 재생 중 변경, 음을 누른 상태의 변경, 다른 트랙을 추가한 상태에서도 반복한다.

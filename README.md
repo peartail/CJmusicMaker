@@ -201,13 +201,23 @@ VST3 호스팅, ASIO, 복잡한 자동화, 고급 마스터링은 위 기본 흐
 
 ## 악기 변경 진단 로그
 
-앱은 실행할 때마다 로컬 `instrument-diagnostic.log`에 버전과 실행 파일 경로를 기록한다. 트랙의 `Change Instrument...` 선택과 적용 전후에는 트랙·FourOsc ID, 프리셋 번호, 주요 합성 파라미터를 기록한다. 화면 건반과 컴퓨터 건반의 Note On/Off, 드럼 입력, 재생·녹음 시작과 종료도 기록한다. 로그 파일은 앱의 `View > Show Instrument Diagnostic Log`에서 탐색기로 열 수 있다. Windows 저장 위치는 JUCE 시스템 로그 폴더의 `MusicBitMaker\instrument-diagnostic.log`이며, 기존 파일이 1MB를 넘으면 다음 실행 시 앞부분을 줄인다.
+앱은 실행할 때마다 로컬 `instrument-diagnostic.log`에 버전과 실행 파일 경로를 기록한다. 트랙의 `Settings > Change Instrument...` 선택과 적용 전후에는 트랙·FourOsc ID, 프리셋 번호, 주요 합성 파라미터를 기록한다. 화면 건반과 컴퓨터 건반의 Note On/Off, 드럼 입력, 재생·녹음 시작과 종료도 기록한다. 로그 파일은 앱의 `View > Show Instrument Diagnostic Log`에서 탐색기로 열 수 있다. Windows 저장 위치는 JUCE 시스템 로그 폴더의 `MusicBitMaker\instrument-diagnostic.log`이며, 기존 파일이 1MB를 넘으면 다음 실행 시 앞부분을 줄인다.
 
 기본 이벤트 로그는 UI 입력과 Tracktion Edit 플러그인 상태를 기록한다. 로그는 프로젝트 파일에 저장되지 않으며 Git에 포함하지 않는다. 독립 검사: `.\build\MusicBitMaker_artefacts\Debug\MusicBitMaker.exe --self-test-instrument-log`.
 
 v0.1017부터 악기 변경·건반 Note On·재생 시작 뒤에는 Tracktion의 실시간 오디오 그래프에서 `post-synth`, `post-track`, `post-master` 세 지점의 4096프레임 구간을 기록한다. `audio-capture-start`의 ID와 `audio-window`의 ID를 맞춰 읽는다. 각 구간에는 원본 float 파형 비트의 64비트 해시, RMS, 피크, 0이 아닌 샘플 수가 포함된다. 오디오 콜백에서는 고정 크기 메모리에 수치만 수집하고, UI 타이머가 파일에 기록한다. 해시는 작은 샘플 차이에도 바뀌므로 음색 유사도를 뜻하지 않는다. `post-master`는 오디오 장치로 보내기 전의 앱 내부 출력이며, 물리적 스피커 소리를 측정하지 않는다. 독립 검사: `.\build\MusicBitMaker_artefacts\Debug\MusicBitMaker.exe --self-test-audio-tap`.
 
 v0.1018은 트랙 출력을 기본 오디오 장치로 연결한다. 이전 빌드는 Tracktion의 `setOutputToDefaultDevice(true)`를 MIDI 출력으로 잘못 해석해 내부 FourOsc 소리가 마스터 오디오 경로에 도달하지 않았다. 로그의 `defaultAudioOut=1`은 트랙 라우팅 상태를 뜻하며, 새 연주에서 `post-master`의 `nonZero`와 해시로 내부 오디오 전달 여부를 확인할 수 있다.
+
+v0.1020은 반복 연주와 트랙 합산으로 발생하는 클리핑을 막기 위해 Tracktion 마스터 경로에 `-12 dB` 헤드룸과 `-0.5 dB` JUCE 리미터를 적용한다. 상단 `MASTER` 미터는 보호 뒤의 최종 피크를 보여주며, 보호 전 입력이 디지털 최대 범위를 넘거나 리미터가 동작하면 `PROTECTED`를 약 1초간 표시한다. 설계와 용어는 `docs/master-output-safety-plan.md`에 정리되어 있다. 독립 검사: `.\build\MusicBitMaker_artefacts\Debug\MusicBitMaker.exe --self-test-master-safety`.
+
+v0.1021은 `Edit > Shortcuts...`에서 36개 피아노 건반, 네 드럼, Kick 보조 키, 옥타브 이동 키를 직접 지정·해제할 수 있다. 기본값은 가운데 옥타브 `A/W/S/E/D/F/T/G/Y/H/U/J`, 드럼 `Z/X/C/V`, Kick 보조 `Space`, 옥타브 이동 `N/M`이며 좌우 옥타브는 미지정이다. 설정은 모든 프로젝트에 공통으로 저장되고 충돌·손상된 설정은 거부한다. 새 프로젝트는 C3~B5로 시작하되 기존 프로젝트의 저장된 음역은 유지한다. 독립 검사: `.\build\MusicBitMaker_artefacts\Debug\MusicBitMaker.exe --self-test-shortcuts`.
+
+v0.1022는 트랙 우클릭의 독립 `Change Instrument...` 항목을 `Settings > Change Instrument...` 하위 메뉴로 옮겼다. 이후 파형, 엔벌로프, 필터, LFO, 이펙트 같은 트랙 악기 설정은 이 메뉴 아래에 확장한다.
+
+v0.1023은 `Settings > Sound Controls...`에서 Oscillator 1 파형, Attack/Release, Filter Cutoff/Resonance, Reverb Mix를 편집한다. 값은 선택 트랙의 Tracktion FourOsc 플러그인 상태에 직접 저장되며 프로젝트 저장·불러오기에도 유지된다. 독립 검사: `.\build\MusicBitMaker_artefacts\Debug\MusicBitMaker.exe --self-test-synth-controls`.
+
+v0.1024는 `Edit > Shortcuts...`에 Root와 Scale 선택기를 추가한다. 피아노 36음 단축키는 C~B의 Root와 Major/Natural Minor 조합별 24개 프로필로 저장되며, 건반 창에서 Root/Scale을 바꾸면 해당 프로필이 즉시 적용된다. 드럼과 옥타브 이동 키는 음계와 관계없는 공통 설정으로 유지한다. 기존 v0.1021 단일 단축키 설정은 처음 실행할 때 24개 프로필의 시작값으로 자동 사용한다.
 
 ## 실시간 오디오 규칙
 

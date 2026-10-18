@@ -148,6 +148,21 @@ LFO는 `Low Frequency Oscillator`, 즉 저주파 오실레이터의 약자다. �
 
 `Space Beep`은 특정 게임의 음원을 사용하거나 그대로 복제한 것이 아니다. 우주 SF 장르에서 흔히 느껴지는 짧은 전자음과 공간계를 독자적인 파라미터 조합으로 만든 것이다.
 
+## Track Settings에 넣을 수 있는 항목
+
+v0.1022부터 트랙 우클릭의 `Settings` 아래에서 `Change Instrument...`를 연다. v0.1023에서는 같은 메뉴의 `Sound Controls...`에서 Oscillator 1 파형, Attack/Release, Filter Cutoff/Resonance, Reverb Mix를 직접 입력하고 적용할 수 있다.
+
+| 설정 묶음 | 대표 조절값 | 귀로 느껴지는 변화 |
+| --- | --- | --- |
+| Instrument | 프리셋 선택 | 여러 값을 한꺼번에 바꿔 기본 음색을 선택한다. |
+| Oscillator | 파형, Level, Tune, Detune, Pulse Width | 소리의 기본 재료, 두께와 음높이를 바꾼다. |
+| Amp Envelope | Attack, Decay, Sustain, Release | 건반을 누르고 뗄 때 음량이 변하는 시간을 바꾼다. |
+| Filter | Type, Cutoff, Resonance | 소리의 밝기와 특정 주파수의 강조를 바꾼다. |
+| LFO | Target, Rate, Depth | 피치·음량·필터가 반복해서 흔들리는 방식을 정한다. |
+| Effects | Distortion, Chorus, Delay, Reverb와 Mix | 거친 질감, 두께, 반복음, 공간감을 더한다. |
+
+첫 편집 화면은 모든 값을 한꺼번에 노출하기보다 `Oscillator 1 파형`, `Attack/Release`, `Filter Cutoff/Resonance`, `Reverb Mix`로 구성했다. `Oscillator 2`, 세부 튜닝, LFO 연결표는 기본 조절이 안정된 뒤 추가할 수 있다. 각 값은 Tracktion `Edit`의 FourOsc 플러그인 상태에 저장되어 프로젝트 저장·불러오기와 실제 재생이 같은 데이터를 사용한다.
+
 ## 앱에서 연습하는 순서
 
 1. 트랙 하나를 선택하고 `Generated Keys`로 같은 멜로디를 녹음한다.
