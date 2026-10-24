@@ -1,6 +1,6 @@
 # MusicBitMaker 기능 명세
 
-기준일: 2026-10-18 · 기준 소스 버전: v0.1025 · 대상: Windows x64 네이티브 앱
+기준일: 2026-10-24 · 기준 소스 버전: v0.1036 · 대상: Windows x64 네이티브 앱
 
 이 문서는 현재 제품 동작, 기대 동작, 검증 상태를 구분하는 기준이다. `src/Main.cpp`, `README.md`와 현재 작업 폴더의 구현을 기준으로 작성했다. “구현”은 코드 경로가 존재한다는 뜻이며, 모든 사용자 시나리오가 정상 검증되었다는 뜻은 아니다. 특히 악기 음색 변경은 사용자 보고에 따라 미해결 문제로 관리한다.
 
@@ -17,6 +17,8 @@
 | 음색 | 같은 C4를 연주해도 악기에 따라 달라지는 소리의 성격 |
 | Root / Scale | 기준음 / 음계. 현재는 건반 색상 안내에 사용 |
 | Octave | 건반 입력의 음역. 한 단계 이동하면 MIDI 음높이가 12만큼 변경 |
+| Loop / Cycle | 정한 시작점과 끝점 사이를 되돌아가며 반복 재생하는 기능 |
+| Loop Range | 모든 트랙에 공통으로 적용되는 반복 재생 시작·끝 구간 |
 
 프로젝트의 음악 상태는 Tracktion Edit를 기준으로 한다. UI는 상태를 표시하고 변경하는 역할을 한다. C# WinForms 프로젝트는 과거 프로토타입이며 이 문서의 기능 대상은 C++ 앱이다.
 
@@ -48,15 +50,21 @@
 | KEY-02 | 음계 안내 | Root와 Major/Natural Minor 선택. 기준음과 음계 구성음을 색으로 강조 | 구현 |
 | KEY-03 | 옥타브 | Octave 드롭다운 또는 기본 N/M. 시작 범위 0~6, 새 프로젝트 기본 3 | 구현, 전용 테스트 통과 |
 | KEY-04 | 별도 건반 창 | 닫은 후 View → Keyboard Pad로 다시 열기. 드럼·트랙 없음 상태에서는 비활성화 | 구현 |
-| KEY-05 | 3옥타브 화면 건반 | 36개 음의 화면 표시, 모든 음의 마우스 입력·녹음, 타임라인 음역 연동 | 구현, 전용 테스트 추가 |
-| KEY-06 | 연주 단축키 설정 | Edit → Shortcuts에서 Root/Scale별 피아노 36음과 공통 드럼·Kick 보조·옥타브 이동 키를 지정·해제하고 사용자 설정에 저장 | 구현, 매핑 검사 통과·실제 키보드 확인 필요 |
-| DRM-01 | 드럼 입력 | Kick, Snare, Closed Hat, Open Hat 버튼과 메인 창 단축키로 입력 | 구현, 별도 드럼 창 미구현 |
-| REC-01 | MIDI 녹음 | 16초 구간에 시작·종료 시간, 음높이 저장. 선택 트랙 전환으로 레이어 녹음 | 구현 |
-| PLAY-01 | 재생 / 정지 | PLAY로 재생. STOP은 녹음 종료·재생 정지 후 위치를 0초로 이동 | 구현 |
+| KEY-05 | 3옥타브 화면 건반 | 36개 음의 화면 표시, 모든 음의 마우스 입력·녹음. 타임라인 표시 행과 입력 음역은 독립 | 구현, 전용 테스트 추가 |
+| KEY-06 | 연주·재생 단축키 설정 | Edit → Shortcuts에서 Root/Scale별 피아노 36음과 공통 드럼·옥타브 이동·Play/Stop·Loop 키를 지정·해제하고 사용자 설정에 저장 | 구현, 매핑 검사 통과·실제 키보드 확인 필요 |
+| DRM-01 | 드럼 입력 | 메인 창 단축키로 Kick, Snare, Closed Hat, Open Hat 입력. 상단 개별 드럼 버튼은 표시하지 않음 | 구현, 별도 드럼 창 미구현 |
+| REC-01 | 실시간 MIDI 녹음 | REC를 켜고 PLAY하면 16초 구간의 재생 헤드 진행에 맞춰 시작·종료 시간과 음높이 저장. LOOP와 함께 사용할 수 있고 경계를 넘긴 지속음은 끝/시작으로 분할 | 구현 |
+| REC-02 | 정지 상태 입력 | RECORD MODE에서 재생을 멈춘 채 건반을 누르면 현재 재생 헤드에 노트 추가. 누른 실제 시간을 길이로 사용하고 드럼은 고정 길이 사용 | 구현, 전용 계산 검사 추가 |
+| PLAY-01 | 재생 / 정지 | 하나의 PLAY/STOP 버튼과 기본 Space 단축키로 토글. 재생 중 버튼은 STOP으로 표시되고 정지하면 위치를 0초로 이동 | 구현 |
 | PLAY-02 | 재생 위치 | 타임라인 클릭으로 위치 이동. Tracktion Transport를 시간 기준으로 사용 | 구현 |
+| PLAY-03 | 구간 반복 재생 | LOOP 버튼으로 활성화. 공통 룰러에서 범위 생성, 양끝 조절, 가운데 이동. 모든 트랙을 같은 시간 구간으로 반복하고 프로젝트에 상태 저장 | 구현, 전용 상태 검사 통과·실제 청취 필요 |
+| PLAY-04 | 시간 눈금자 | 루프 영역 아래에 매초 분:초 형식으로 표시. 클릭·드래그로 재생 헤드 이동 | 구현, 표시 형식 검사 추가 |
+| PLAY-05 | BPM / 메트로놈 | 40~240 BPM 설정. METRO를 켜면 PLAY 중 Tracktion Click Track을 매 박자 출력하고 마디 첫 박자를 강조. 프로젝트에 상태 저장 | 구현, 상태 검사 추가·실제 청취 필요 |
 | EDIT-01 | 노트 편집 | 노트 선택, 본체 드래그로 시간·음높이 이동, 오른쪽 손잡이로 길이 변경 | 구현 |
 | EDIT-02 | 노트 삭제 | 선택 노트에 Delete/Backspace 또는 DELETE 버튼 | 구현 |
-| VIEW-01 | 타임라인 표시 | 신시사이저는 음높이별 레인, 드럼은 단일 레인. 현재 건반 범위와 저장된 노트 음역 포함 | 구현 |
+| EDIT-03 | 노트 옥타브 이동 | 노트 우클릭 → Octave Up/Down으로 MIDI 음높이를 12씩 이동 | 구현, 전용 계산 검사 추가 |
+| VIEW-01 | 12행 타임라인 표시 | 신시사이저는 C~B 12행에 옥타브 색·숫자 라벨로 표시하고 겹친 옥타브 노트를 행 안에서 분할. 드럼은 단일 행 | 구현, 전용 계산 검사 추가 |
+| VIEW-02 | 가로 타임라인 스케일 | TIME ZOOM 1~8배 확대와 VIEW 수평 이동. 노트·루프·재생 헤드·시간 눈금을 동일 좌표로 표시하고 확대 상태에서 노트 드래그 편집 유지 | 구현, 좌표 계산 검사 추가 |
 | MIX-01 | 믹서 | 선택 트랙의 Volume(-60~+6 dB), Pan(좌~우), Mute, Solo. 프로젝트에 저장 | 구현, 실제 출력 회귀 검증 필요 |
 | AUDIO-01 | 장치 설정 | AUDIO SETTINGS에서 JUCE 오디오 장치 설정 창 열기 | 구현, 장치별 확인 필요 |
 
@@ -69,12 +77,13 @@
 | 건반·메인 창 | N / M | 기본 배치에서 한 옥타브 내림 / 올림. 변경 가능 |
 | 건반 창 | Octave / Root / Scale | 왼쪽부터 옥타브, 기준음, 음계 선택 |
 | 메인 창 | Z / X / C / V | Kick / Snare / Closed Hat / Open Hat |
-| 메인 창 | Space | Kick 입력. 재생·정지 단축키가 아님 |
+| 건반·메인 창 | Space | 기본 Play / Stop 토글. Edit → Shortcuts에서 변경 가능 |
+| 건반·메인 창 | 사용자 지정 키 | Loop 켜기 / 끄기. 기본값은 미지정 |
 | 메인 창 | Ctrl+N / Ctrl+O | 새 프로젝트 / 열기 |
 | 메인 창 | Ctrl+S / Ctrl+Shift+S | 저장 / 다른 이름으로 저장 |
 | 메인 창 | Delete / Backspace | 선택 노트 삭제 |
 
-연주 단축키는 모든 프로젝트에 공통인 사용자 설정이며 프로젝트 파일에는 저장하지 않는다. 피아노 단축키는 12개 Root와 Major/Natural Minor 조합별로 저장되어 건반 창의 Root/Scale 변경과 함께 전환된다. 드럼 및 옥타브 이동 키는 모든 음계 프로필에서 공통이다. 한 키는 현재 프로필 안에서 한 동작에만 지정할 수 있고, 설정 창이 키 입력을 기다리는 동안에는 악기가 연주되지 않는다. 현재 파일·편집 단축키는 메인 창에 구현되어 있으므로 건반 창에서도 전역으로 동작한다고 가정하지 않는다.
+연주·재생 단축키는 모든 프로젝트에 공통인 사용자 설정이며 프로젝트 파일에는 저장하지 않는다. 피아노 단축키는 12개 Root와 Major/Natural Minor 조합별로 저장되어 건반 창의 Root/Scale 변경과 함께 전환된다. 드럼, 옥타브 이동, Play/Stop, Loop 키는 모든 음계 프로필에서 공통이다. 한 키는 현재 프로필 안에서 한 동작에만 지정할 수 있고, 설정 창이 키 입력을 기다리는 동안에는 악기가 연주되지 않는다. Play/Stop과 Loop는 메인 창 및 분리된 건반 창에서 동작하며, 현재 파일·편집 단축키는 메인 창 전용이다.
 
 ### 3.2 건반의 음계와 옥타브
 
@@ -165,25 +174,41 @@
 
 ## 6. 검증 현황과 명령
 
-2026-10-16에 확인한 v0.1015 결과다. 이번 기능 명세 문서 작성으로 앱 코드를 변경하거나 다시 빌드하지 않았다.
+2026-10-19에 새 `cmake-build-record-mode` 폴더에서 확인한 v0.1028 결과다.
 
 | 검증 | 결과 | 확인 범위 |
 | --- | --- | --- |
-| Debug 네이티브 빌드 | 성공 | VS 2026/MSVC로 빌드. 외부 소스의 C4819 인코딩 경고 있음 |
-| `--self-test-keyboard-octave` | 통과, 종료 0 | Z/X, 드롭다운, 범위 제한, 전환 시 기존 Note Off, 음높이·라벨 계산 |
-| `--self-test-empty-project` | 통과, 종료 0 | 빈 트랙 저장·복원, Octave 설정 저장·복원, 폴더 폴백 |
-| `--self-test` | 실패, 접근 위반 | 전체 검증 완료 불가 |
+| Debug 네이티브 빌드 | 성공 | VS 2022/MSVC, 외부 소스의 기존 C4819 인코딩 경고 있음 |
+| `--self-test-compact-piano-roll` | 통과, 종료 0 | 12행 매핑, 옥타브 유지 음높이 계산, 옥타브 범위와 색 구분 |
+| `--self-test-record-mode` | 통과, 종료 0 | 정지·재생 상태 노트 길이, 최소 길이, 타임라인 끝 범위 계산 |
+| `--self-test-keyboard-octave` | 통과, 종료 0 | N/M, 드롭다운, 범위 제한, 전환 시 기존 Note Off, 음높이·라벨 계산 |
+| `--self-test-shortcuts` | 통과, 종료 0 | 단축키 기본값, 충돌 검사, 프로필 공유 설정 |
+| `--self-test-loop-playback` | 통과, 종료 0 | 루프 범위 계산과 Tracktion 상태 복원 |
+| `--self-test-synth-controls` | 통과, 종료 0 | 음색 제어값 적용과 상태 복원 |
+| `--self-test-master-safety` | 통과, 종료 0 | 출력 보호와 미터 피크 계산 |
+| `--self-test-automation-cli` | 통과, 종료 0 | 오디오 장치를 열지 않는 프로젝트/트랙/노트 JSON 조회 |
+| `--self-test-live-control` | 통과, 종료 0 | Named Pipe 왕복, 토큰·스키마 검증, 메시지 스레드 처리, PNG 인코딩·디코딩 |
+| `--self-test` | 통과, 종료 0 | 전체 자동 검사 |
 | 실제 장치에서 악기 변경 청감 | 사용자 문제 보고 | BUG-001의 절차로 재검증 필요 |
 
-저장소 표준 실행 파일은 `build/MusicBitMaker_artefacts/Debug/MusicBitMaker.exe`다. 현재 로컬에서 만든 v0.1015는 기존 앱 실행에 따른 파일 잠금을 피하기 위해 `MusicBitMaker-v0.1015.exe`로 생성했다. 예전 기본 파일과 혼동하지 않도록 창 제목의 버전을 확인한다.
+저장소 표준 실행 파일은 `build/MusicBitMaker_artefacts/Debug/MusicBitMaker.exe`다. 이번 검증 실행 파일은 기존 빌드 잠금을 피하기 위해 `cmake-build-record-mode/MusicBitMaker_artefacts/Debug/MusicBitMaker.exe`에 생성했다. 창 제목의 `v0.1028`을 확인한다.
 
 ```powershell
-.\build\MusicBitMaker_artefacts\Debug\MusicBitMaker-v0.1015.exe --self-test-keyboard-octave
-.\build\MusicBitMaker_artefacts\Debug\MusicBitMaker-v0.1015.exe --self-test-empty-project
-.\build\MusicBitMaker_artefacts\Debug\MusicBitMaker-v0.1015.exe --self-test
+.\cmake-build-record-mode\MusicBitMaker_artefacts\Debug\MusicBitMaker.exe --self-test-compact-piano-roll
+.\cmake-build-record-mode\MusicBitMaker_artefacts\Debug\MusicBitMaker.exe --self-test-record-mode
+.\cmake-build-record-mode\MusicBitMaker_artefacts\Debug\MusicBitMaker.exe --self-test-keyboard-octave
+.\cmake-build-record-mode\MusicBitMaker_artefacts\Debug\MusicBitMaker.exe --self-test
 ```
 
 표준 빌드 명령은 [AGENTS.md](../AGENTS.md)의 Commands를 기준으로 한다. 문서의 VS 2022와 현재 PC의 VS 2026 환경 차이는 별도로 구분한다.
+
+v0.1033의 `--live` 모드는 실행 중인 GUI 앱의 실제 Tracktion Edit 및 Transport 상태를 조회한다. 현재 지원 명령은 `ping`, `status`, `list-tracks`, `list-notes`이며, 앱 미실행 시 종료 코드 7과 `app_not_running`을 반환한다.
+
+v0.1034의 `capture-ui` 명령은 실행 중인 `MainComponent`를 현재 크기로 PNG에 기록한다. 현재 화면 상태는 포함하지만 Windows 제목 표시줄, 다른 앱과 분리된 Keyboard Pad 창은 캡처하지 않는다. 성공 결과에는 절대 경로, `png` 형식, 너비, 높이와 바이트 수가 포함된다.
+
+v0.1035는 확대된 타임라인에서 보이는 시간 범위 밖의 노트, 루프 및 재생 헤드를 트랙 콘텐츠 경계로 제한한다. 음계·악기 라벨 영역에서 화면 밖 노트를 선택하거나 재생 헤드를 이동하지 않는다.
+
+v0.1036은 PLAY와 STOP을 한 버튼으로 통합하고 Space를 기본 Play/Stop 단축키로 변경한다. Loop 단축키는 기본 미지정이며 `Edit > Shortcuts...`에서 Play/Stop과 함께 설정한다. 기존 단축키 스키마의 Kick 보조키는 제거하고 사용자 프로필은 새 스키마로 자동 변환한다.
 
 ## 7. 미구현·후속 범위
 

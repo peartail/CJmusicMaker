@@ -41,6 +41,12 @@ Canonical native commands:
 - Release build: `cmake --build build --config Release --target MusicBitMaker`
 - Run: `.\build\MusicBitMaker_artefacts\Debug\MusicBitMaker.exe`
 - Self-test: `.\build\MusicBitMaker_artefacts\Debug\MusicBitMaker.exe --self-test`
+- Loop playback test: `.\build\MusicBitMaker_artefacts\Debug\MusicBitMaker.exe --self-test-loop-playback`
+- Compact piano-roll test: `.\build\MusicBitMaker_artefacts\Debug\MusicBitMaker.exe --self-test-compact-piano-roll`
+- Record-mode test: `.\build\MusicBitMaker_artefacts\Debug\MusicBitMaker.exe --self-test-record-mode`
+- Timeline zoom/metronome test: `.\build\MusicBitMaker_artefacts\Debug\MusicBitMaker.exe --self-test-timeline-tools`
+- Headless inspection CLI test: `.\build\MusicBitMaker_artefacts\Debug\MusicBitMaker.exe --self-test-automation-cli`
+- Live app control/UI capture test: `.\build\MusicBitMaker_artefacts\Debug\MusicBitMaker.exe --self-test-live-control`
 - Keyboard octave UI/shortcut test: `.\build\MusicBitMaker_artefacts\Debug\MusicBitMaker.exe --self-test-keyboard-octave`
 - Shortcut map validation test: `.\build\MusicBitMaker_artefacts\Debug\MusicBitMaker.exe --self-test-shortcuts`
 - Synth sound-controls test: `.\build\MusicBitMaker_artefacts\Debug\MusicBitMaker.exe --self-test-synth-controls`

@@ -3,6 +3,9 @@
 #include <juce_dsp/juce_dsp.h>
 #include <juce_gui_extra/juce_gui_extra.h>
 
+#include "AutomationCli.h"
+#include "LiveControl.h"
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -74,10 +77,11 @@ struct ShortcutMap
 {
     static constexpr size_t pianoCount = midiNotes.size();
     static constexpr size_t drumBase = pianoCount;
-    static constexpr size_t kickAlternate = drumBase + 4;
-    static constexpr size_t octaveDown = kickAlternate + 1;
+    static constexpr size_t octaveDown = drumBase + 4;
     static constexpr size_t octaveUp = octaveDown + 1;
-    static constexpr size_t actionCount = octaveUp + 1;
+    static constexpr size_t playStop = octaveUp + 1;
+    static constexpr size_t loop = playStop + 1;
+    static constexpr size_t actionCount = loop + 1;
 
     std::array<int, actionCount> keys {};
 
@@ -92,9 +96,9 @@ struct ShortcutMap
         result.keys[drumBase + 1] = 'X';
         result.keys[drumBase + 2] = 'C';
         result.keys[drumBase + 3] = 'V';
-        result.keys[kickAlternate] = juce::KeyPress::spaceKey;
         result.keys[octaveDown] = 'N';
         result.keys[octaveUp] = 'M';
+        result.keys[playStop] = juce::KeyPress::spaceKey;
         return result;
     }
 
@@ -194,16 +198,63 @@ ShortcutMap parseShortcutMap (const juce::String& text)
     return parsed.isValid() ? parsed : result;
 }
 
+ShortcutMap parseLegacyShortcutMap (const juce::String& text)
+{
+    constexpr size_t legacyActionCount = ShortcutMap::pianoCount + 7;
+    constexpr size_t legacyKickAlternate = ShortcutMap::drumBase + 4;
+    constexpr size_t legacyOctaveDown = legacyKickAlternate + 1;
+    constexpr size_t legacyOctaveUp = legacyOctaveDown + 1;
+    auto result = ShortcutMap::defaults();
+    const auto values = juce::StringArray::fromTokens (text, ",", "");
+    if (values.size() != static_cast<int> (legacyActionCount))
+        return result;
+
+    std::array<int, legacyActionCount> legacyKeys {};
+    std::vector<int> assigned;
+    for (size_t index = 0; index < legacyKeys.size(); ++index)
+    {
+        const auto& value = values[static_cast<int> (index)];
+        if (value.isEmpty() || ! value.containsOnly ("0123456789"))
+            return result;
+        const auto key = value.getIntValue();
+        if (key != 0
+            && (key < 32 || key > 126
+                || std::find (assigned.begin(), assigned.end(), key) != assigned.end()))
+            return result;
+        legacyKeys[index] = key;
+        if (key != 0)
+            assigned.push_back (key);
+    }
+
+    ShortcutMap migrated;
+    std::copy_n (legacyKeys.begin(), ShortcutMap::drumBase + 4, migrated.keys.begin());
+    migrated.keys[ShortcutMap::octaveDown] = legacyKeys[legacyOctaveDown];
+    migrated.keys[ShortcutMap::octaveUp] = legacyKeys[legacyOctaveUp];
+    for (auto& key : migrated.keys)
+        if (key == juce::KeyPress::spaceKey)
+            key = 0;
+    migrated.keys[ShortcutMap::playStop] = juce::KeyPress::spaceKey;
+    return migrated.isValid() ? migrated : result;
+}
+
 ShortcutProfiles loadShortcutProfiles (juce::PropertiesFile& settings)
 {
     auto profiles = defaultShortcutProfiles();
     const auto schemaVersion = settings.getIntValue (shortcutSchemaVersionKey, 0);
     if (schemaVersion == 1)
     {
-        profiles.fill (parseShortcutMap (settings.getValue (shortcutMapKey)));
+        profiles.fill (parseLegacyShortcutMap (settings.getValue (shortcutMapKey)));
         return profiles;
     }
-    if (schemaVersion != 2)
+    if (schemaVersion == 2)
+    {
+        for (size_t index = 0; index < profiles.size(); ++index)
+            profiles[index] = parseLegacyShortcutMap (
+                settings.getValue (shortcutProfileKeyPrefix + juce::String (index)));
+        applySharedShortcutActions (profiles, profiles.front());
+        return profiles;
+    }
+    if (schemaVersion != 3)
         return profiles;
 
     for (size_t index = 0; index < profiles.size(); ++index)
@@ -215,7 +266,7 @@ ShortcutProfiles loadShortcutProfiles (juce::PropertiesFile& settings)
 
 void saveShortcutProfiles (juce::PropertiesFile& settings, const ShortcutProfiles& profiles)
 {
-    settings.setValue (shortcutSchemaVersionKey, 2);
+    settings.setValue (shortcutSchemaVersionKey, 3);
     for (size_t index = 0; index < profiles.size(); ++index)
         settings.setValue (shortcutProfileKeyPrefix + juce::String (index),
                            serialiseShortcutMap (profiles[index]));
@@ -265,6 +316,33 @@ juce::String compactPitchLabel (int pitch)
 {
     return juce::String (rootNames[static_cast<size_t> (pitch % 12)])
         .upToFirstOccurrenceOf ("/", false, false) + juce::String (pitch / 12 - 1);
+}
+
+constexpr int pianoRollLaneCount = 12;
+
+int pianoRollLaneForPitch (int pitch)
+{
+    return ((pitch % pianoRollLaneCount) + pianoRollLaneCount) % pianoRollLaneCount;
+}
+
+int pitchOnPianoRollLane (int originalPitch, int lane)
+{
+    const auto octaveStart = originalPitch - pianoRollLaneForPitch (originalPitch);
+    return juce::jlimit (0, 127, octaveStart + juce::jlimit (0, pianoRollLaneCount - 1, lane));
+}
+
+bool canMovePitchByOctave (int pitch, int octaveDelta)
+{
+    const auto moved = pitch + octaveDelta * pianoRollLaneCount;
+    return moved >= 0 && moved <= 127;
+}
+
+juce::Colour octaveColour (int pitch)
+{
+    auto hue = std::fmod (0.08f + static_cast<float> (pitch / 12 - 1) * 0.13f, 1.0f);
+    if (hue < 0.0f)
+        hue += 1.0f;
+    return juce::Colour::fromHSV (hue, 0.58f, 0.86f, 1.0f);
 }
 const juce::Identifier trackHeightProperty { "musicBitMakerTrackHeight" };
 constexpr auto lastNewProjectDirectoryKey = "lastNewProjectDirectory";
@@ -346,6 +424,39 @@ struct TimelineNote
     double endSeconds = 0.0;
 };
 
+struct LoopRangeSeconds
+{
+    double start = 0.0;
+    double end = 4.0;
+};
+
+enum class LoopDragMode { none, create, resizeStart, resizeEnd, move };
+
+constexpr double minimumLoopLengthSeconds = 0.25;
+
+LoopRangeSeconds normaliseLoopRange (double start, double end)
+{
+    if (start > end)
+        std::swap (start, end);
+
+    start = juce::jlimit (0.0, timelineLengthSeconds, start);
+    end = juce::jlimit (0.0, timelineLengthSeconds, end);
+    if (end - start < minimumLoopLengthSeconds)
+    {
+        end = juce::jmin (timelineLengthSeconds, start + minimumLoopLengthSeconds);
+        start = juce::jmax (0.0, end - minimumLoopLengthSeconds);
+    }
+    return { start, end };
+}
+
+LoopRangeSeconds moveLoopRange (LoopRangeSeconds range, double delta)
+{
+    range = normaliseLoopRange (range.start, range.end);
+    const auto length = range.end - range.start;
+    const auto start = juce::jlimit (0.0, timelineLengthSeconds - length, range.start + delta);
+    return { start, start + length };
+}
+
 TimelineNote editNoteRange (TimelineNote note, double deltaSeconds, bool resizeEnd)
 {
     constexpr double minimumLength = 0.05;
@@ -365,6 +476,69 @@ TimelineNote editNoteRange (TimelineNote note, double deltaSeconds, bool resizeE
     }
 
     return note;
+}
+
+constexpr double minimumRecordedNoteLength = 0.05;
+
+double recordedNoteStart (double playheadSeconds)
+{
+    return juce::jlimit (0.0, timelineLengthSeconds - minimumRecordedNoteLength, playheadSeconds);
+}
+
+double recordedNoteEnd (double startSeconds, double transportEndSeconds, double heldSeconds)
+{
+    const auto transportLength = transportEndSeconds - startSeconds;
+    const auto length = transportLength >= minimumRecordedNoteLength
+                      ? transportLength : juce::jmax (minimumRecordedNoteLength, heldSeconds);
+    return juce::jmin (timelineLengthSeconds, startSeconds + length);
+}
+
+juce::String timelineTimeLabel (int totalSeconds)
+{
+    totalSeconds = juce::jmax (0, totalSeconds);
+    return juce::String (totalSeconds / 60) + ":"
+         + juce::String (totalSeconds % 60).paddedLeft ('0', 2);
+}
+
+struct TimelineViewRange
+{
+    double start = 0.0;
+    double length = timelineLengthSeconds;
+};
+
+constexpr double minimumTimelineViewSeconds = 2.0;
+
+TimelineViewRange normaliseTimelineView (double start, double length)
+{
+    length = juce::jlimit (minimumTimelineViewSeconds, timelineLengthSeconds, length);
+    start = juce::jlimit (0.0, timelineLengthSeconds - length, start);
+    return { start, length };
+}
+
+double timelineTimeForProportion (TimelineViewRange view, double proportion)
+{
+    view = normaliseTimelineView (view.start, view.length);
+    return view.start + juce::jlimit (0.0, 1.0, proportion) * view.length;
+}
+
+double timelineProportionForTime (TimelineViewRange view, double seconds)
+{
+    view = normaliseTimelineView (view.start, view.length);
+    return (seconds - view.start) / view.length;
+}
+
+bool timelineItemContainsPoint (juce::Rectangle<float> timeline,
+                                juce::Rectangle<float> item,
+                                juce::Point<float> point,
+                                float tolerance = 0.0f)
+{
+    return timeline.contains (point) && item.expanded (tolerance).contains (point);
+}
+
+bool didLoopPlaybackWrap (bool wasPlaying, bool isPlaying, bool looping,
+                          double previousSeconds, double currentSeconds)
+{
+    return wasPlaying && isPlaying && looping && currentSeconds + 0.001 < previousSeconds;
 }
 
 struct SynthPreset
@@ -691,6 +865,7 @@ public:
                           std::function<void (int, int)> scaleChangedToUse,
                           std::function<void (int)> octaveChangedToUse,
                           std::function<void (const SynthControls&, bool)> soundControlsChangedToUse,
+                          std::function<bool (int)> sharedShortcutPressedToUse,
                           std::function<void (bool)> expansionChangedToUse)
         : shortcuts (shortcutsToUse),
           noteChanged (std::move (noteChangedToUse)),
@@ -698,6 +873,7 @@ public:
           scaleChanged (std::move (scaleChangedToUse)),
           octaveChanged (std::move (octaveChangedToUse)),
           soundControlsChanged (std::move (soundControlsChangedToUse)),
+          sharedShortcutPressed (std::move (sharedShortcutPressedToUse)),
           expansionChanged (std::move (expansionChangedToUse))
     {
         setWantsKeyboardFocus (true);
@@ -872,6 +1048,8 @@ public:
     bool keyPressed (const juce::KeyPress& key) override
     {
         const auto keyCode = canonicalShortcutKey (key);
+        if (sharedShortcutPressed != nullptr && sharedShortcutPressed (keyCode))
+            return true;
         if (keyCode == shortcuts.keys[ShortcutMap::octaveDown]
             || keyCode == shortcuts.keys[ShortcutMap::octaveUp])
         {
@@ -1066,6 +1244,7 @@ private:
     std::function<void (int, int)> scaleChanged;
     std::function<void (int)> octaveChanged;
     std::function<void (const SynthControls&, bool)> soundControlsChanged;
+    std::function<bool (int)> sharedShortcutPressed;
     std::function<void (bool)> expansionChanged;
     juce::ComboBox octaveBox, rootBox, scaleBox, waveformBox;
     juce::TextButton soundControlsButton { "SOUND CONTROLS +" };
@@ -1087,17 +1266,21 @@ public:
                        std::function<void (int, int)> scaleChanged,
                        std::function<void (int)> octaveChanged,
                        std::function<void (const SynthControls&, bool)> soundControlsChanged,
+                       std::function<bool (int)> sharedShortcutPressedToUse,
                        std::function<void()> closedToUse)
         : DocumentWindow ("Keyboard Pad", juce::Colour::fromRGB (20, 23, 31),
                           minimiseButton | closeButton),
+          sharedShortcutPressed (std::move (sharedShortcutPressedToUse)),
           closed (std::move (closedToUse))
     {
+        setWantsKeyboardFocus (true);
         setUsingNativeTitleBar (true);
         setResizable (true, false);
         setResizeLimits (900, 280, 1600, 280);
         pad = new KeyboardPadComponent (shortcuts, std::move (noteChanged), std::move (noteIsDown),
                                         std::move (scaleChanged), std::move (octaveChanged),
                                         std::move (soundControlsChanged),
+                                        sharedShortcutPressed,
                                         [this] (bool expanded) { setSoundControlsExpanded (expanded); });
         setContentOwned (pad, true);
         centreWithSize (1160, 280);
@@ -1146,6 +1329,12 @@ public:
         closed();
     }
 
+    bool keyPressed (const juce::KeyPress& key) override
+    {
+        return sharedShortcutPressed != nullptr
+            && sharedShortcutPressed (canonicalShortcutKey (key));
+    }
+
 private:
     void setSoundControlsExpanded (bool expanded)
     {
@@ -1155,6 +1344,7 @@ private:
     }
 
     KeyboardPadComponent* pad = nullptr;
+    std::function<bool (int)> sharedShortcutPressed;
     std::function<void()> closed;
 };
 
@@ -1269,7 +1459,7 @@ public:
                            juce::Justification::centredLeft);
         graphics.setColour (juce::Colour::fromRGB (151, 160, 180));
         graphics.setFont (juce::FontOptions (12.0f));
-        graphics.drawText ("Piano keys are saved per Root + Scale. Drums and octave controls are shared.",
+        graphics.drawText ("Piano keys are saved per Root + Scale. Drums, transport, loop, and octave controls are shared.",
                            20, 44, getWidth() - 40, 20, juce::Justification::centredLeft);
 
         for (const auto index : whiteNoteIndices)
@@ -1277,8 +1467,8 @@ public:
         for (const auto index : blackNoteIndices)
             drawPianoKey (graphics, static_cast<size_t> (index), true);
 
-        constexpr std::array<const char*, 7> names {
-            "Kick", "Snare", "Closed Hat", "Open Hat", "Kick Alternate", "Octave Down", "Octave Up"
+        constexpr std::array<const char*, 8> names {
+            "Kick", "Snare", "Closed Hat", "Open Hat", "Octave Down", "Octave Up", "Play / Stop", "Loop"
         };
         for (size_t index = 0; index < names.size(); ++index)
         {
@@ -1393,7 +1583,7 @@ private:
             const auto width = (getWidth() - 52) / 4;
             return { 20 + index * (width + 4), 334, width, 62 };
         }
-        const auto width = (getWidth() - 48) / 3;
+        const auto width = (getWidth() - 52) / 4;
         return { 20 + (index - 4) * (width + 4), 404, width, 58 };
     }
 
@@ -1401,8 +1591,8 @@ private:
     {
         if (action >= 0 && action < static_cast<int> (ShortcutMap::pianoCount))
             return compactPitchLabel (keyboardPitch (static_cast<size_t> (action), 3)) + " piano";
-        constexpr std::array<const char*, 7> names {
-            "Kick", "Snare", "Closed Hat", "Open Hat", "Kick Alternate", "Octave Down", "Octave Up"
+        constexpr std::array<const char*, 8> names {
+            "Kick", "Snare", "Closed Hat", "Open Hat", "Octave Down", "Octave Up", "Play / Stop", "Loop"
         };
         const auto index = action - static_cast<int> (ShortcutMap::drumBase);
         return juce::isPositiveAndBelow (index, static_cast<int> (names.size())) ? names[static_cast<size_t> (index)]
@@ -1507,9 +1697,91 @@ private:
     std::function<void()> closed;
 };
 
+class RecordButton final : public juce::TextButton
+{
+public:
+    RecordButton() : juce::TextButton ("REC") {}
+
+    void paintButton (juce::Graphics& graphics, bool highlighted, bool down) override
+    {
+        auto bounds = getLocalBounds().toFloat().reduced (0.5f);
+        const auto active = getToggleState();
+        graphics.setColour (active ? juce::Colour::fromRGB (92, 31, 38)
+                                   : highlighted ? juce::Colour::fromRGB (54, 58, 70)
+                                                 : juce::Colour::fromRGB (42, 46, 57));
+        graphics.fillRoundedRectangle (bounds, 4.0f);
+        graphics.setColour (down ? juce::Colour::fromRGB (255, 128, 128)
+                                 : active ? juce::Colour::fromRGB (255, 62, 72)
+                                          : juce::Colour::fromRGB (208, 57, 67));
+        graphics.fillEllipse (10.0f, bounds.getCentreY() - 5.0f, 10.0f, 10.0f);
+        graphics.setColour (juce::Colours::white);
+        graphics.setFont (juce::FontOptions (14.0f, juce::Font::bold));
+        graphics.drawText ("REC", 25, 0, getWidth() - 30, getHeight(), juce::Justification::centredLeft);
+    }
+};
+
+struct UiCaptureResult
+{
+    bool ok = false;
+    int width = 0, height = 0;
+    juce::int64 bytes = 0;
+    juce::String error;
+};
+
+UiCaptureResult captureComponentToPng (juce::Component& component, const juce::File& output)
+{
+    UiCaptureResult result;
+    if (! juce::MessageManager::getInstance()->isThisTheMessageThread())
+    {
+        result.error = "UI capture must run on the JUCE message thread.";
+        return result;
+    }
+    if (! output.getParentDirectory().isDirectory())
+    {
+        result.error = "The PNG output directory does not exist.";
+        return result;
+    }
+    const auto bounds = component.getLocalBounds();
+    if (bounds.isEmpty())
+    {
+        result.error = "The UI has no drawable size.";
+        return result;
+    }
+
+    const auto image = component.createComponentSnapshot (bounds, true);
+    if (! image.isValid())
+    {
+        result.error = "Could not create the UI snapshot.";
+        return result;
+    }
+
+    juce::TemporaryFile temporary (output);
+    auto stream = temporary.getFile().createOutputStream();
+    juce::PNGImageFormat png;
+    if (stream == nullptr || ! png.writeImageToStream (image, *stream))
+    {
+        result.error = "Could not encode the UI snapshot as PNG.";
+        return result;
+    }
+    stream->flush();
+    stream.reset();
+    if (! temporary.overwriteTargetFileWithTemporary())
+    {
+        result.error = "Could not write the PNG output file.";
+        return result;
+    }
+
+    result.ok = true;
+    result.width = image.getWidth();
+    result.height = image.getHeight();
+    result.bytes = output.getSize();
+    return result;
+}
+
 class MainComponent final : public juce::Component,
                             public juce::MenuBarModel,
-                            private juce::Timer
+                            private juce::Timer,
+                            private juce::ScrollBar::Listener
 {
 public:
     explicit MainComponent (te::Engine& engineToUse)
@@ -1541,19 +1813,19 @@ public:
         initialiseEdit (true);
 
         recordButton.onClick = [this] { toggleRecording(); };
-        playButton.onClick = [this] { startPlayback(); };
-        stopButton.onClick = [this] { stopPlayback(); };
+        playButton.onClick = [this] { togglePlayback(); };
+        loopButton.onClick = [this] { setLooping (loopButton.getToggleState()); };
+        metronomeButton.onClick = [this] { setMetronomeEnabled (metronomeButton.getToggleState()); };
         deleteButton.onClick = [this] { deleteSelectedNote(); };
-        kickButton.onClick = [this] { triggerDrum (0, true); };
-        snareButton.onClick = [this] { triggerDrum (1, true); };
-        closedHatButton.onClick = [this] { triggerDrum (2, true); };
-        openHatButton.onClick = [this] { triggerDrum (3, true); };
         addTrackButton.onClick = [this] { addTrack(); };
         settingsButton.onClick = [this] { showAudioSettings(); };
 
-        for (auto* button : { &recordButton, &playButton, &stopButton, &deleteButton,
-                              &kickButton, &snareButton, &closedHatButton, &openHatButton,
-                              &addTrackButton, &settingsButton })
+        loopButton.setClickingTogglesState (true);
+        metronomeButton.setClickingTogglesState (true);
+        recordButton.setMouseClickGrabsKeyboardFocus (false);
+        addAndMakeVisible (recordButton);
+        for (auto* button : { &playButton, &loopButton, &deleteButton, &addTrackButton,
+                              &settingsButton, &metronomeButton })
         {
             button->setMouseClickGrabsKeyboardFocus (false);
             addAndMakeVisible (*button);
@@ -1578,6 +1850,44 @@ public:
             slider->setWantsKeyboardFocus (false);
             addAndMakeVisible (*slider);
         }
+
+        tempoSlider.setRange (40.0, 240.0, 1.0);
+        tempoSlider.setTextValueSuffix (" BPM");
+        tempoSlider.setSliderStyle (juce::Slider::LinearHorizontal);
+        tempoSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 72, 22);
+        tempoSlider.setWantsKeyboardFocus (false);
+        tempoSlider.onValueChange = [this]
+        {
+            if (! updatingProjectControls)
+            {
+                edit->tempoSequence.getTempo (0)->setBpm (tempoSlider.getValue());
+                statusMessage = "Tempo: " + juce::String (juce::roundToInt (tempoSlider.getValue())) + " BPM";
+                repaint();
+            }
+        };
+        addAndMakeVisible (tempoSlider);
+
+        zoomSlider.setRange (1.0, timelineLengthSeconds / minimumTimelineViewSeconds, 0.25);
+        zoomSlider.setValue (1.0, juce::dontSendNotification);
+        zoomSlider.setTextValueSuffix ("x");
+        zoomSlider.setSliderStyle (juce::Slider::LinearHorizontal);
+        zoomSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 48, 22);
+        zoomSlider.setWantsKeyboardFocus (false);
+        zoomSlider.onValueChange = [this]
+        {
+            const auto newLength = timelineLengthSeconds / zoomSlider.getValue();
+            const auto centre = timelineView.start + timelineView.length * 0.5;
+            setTimelineView ({ centre - newLength * 0.5, newLength });
+            statusMessage = "Timeline zoom: " + juce::String (zoomSlider.getValue(), 2) + "x";
+        };
+        addAndMakeVisible (zoomSlider);
+
+        timelineScrollBar.setRangeLimits (0.0, timelineLengthSeconds);
+        timelineScrollBar.setCurrentRange (0.0, timelineLengthSeconds, juce::dontSendNotification);
+        timelineScrollBar.setSingleStepSize (0.25);
+        timelineScrollBar.addListener (this);
+        timelineScrollBar.setAutoHide (false);
+        addAndMakeVisible (timelineScrollBar);
         volumeSlider.onValueChange = [this]
         {
             if (! updatingTrackControls)
@@ -1648,6 +1958,7 @@ public:
             {
                 applyLiveSynthControls (controls, waveformChanged);
             },
+            [this] (int keyCode) { return handleTransportShortcut (keyCode); },
             [this] { menuItemsChanged(); });
         shortcutEditorWindow = std::make_unique<ShortcutEditorWindow> (
             shortcutProfiles, scaleRoot(), scaleType(),
@@ -1660,7 +1971,6 @@ public:
                 menuItemsChanged();
                 grabKeyboardFocus();
             });
-        updateShortcutLabels();
         syncTrackControls();
         startTimerHz (30);
     }
@@ -1710,10 +2020,183 @@ public:
     ~MainComponent() override
     {
         stopTimer();
+        timelineScrollBar.removeListener (this);
         shortcutEditorWindow.reset();
         keyboardWindow.reset();
         releaseAllLiveNotes();
         edit->getTransport().stop (false, false);
+    }
+
+    musicbitmaker::LiveCommandResult handleLiveCommand (const juce::String& command,
+                                                        const juce::var& arguments)
+    {
+        const auto object = [] { return juce::var (new juce::DynamicObject()); };
+        const auto trackJson = [&object, this] (te::AudioTrack& track, int index)
+        {
+            auto value = object();
+            auto* result = value.getDynamicObject();
+            const auto drum = drumIndexFor (track);
+            result->setProperty ("id", track.itemID.toString());
+            result->setProperty ("index", index);
+            result->setProperty ("name", track.getName());
+            result->setProperty ("instrumentCategory", drum >= 0 ? "drum" : "synth");
+            result->setProperty ("instrument", drum >= 0
+                ? juce::String (drumPresets[static_cast<size_t> (drum)].name)
+                : juce::String (synthPresets[static_cast<size_t> (
+                    findInstrument (track) != nullptr ? presetIndexFor (*findInstrument (track)) : 0)].name));
+            result->setProperty ("muted", track.isMuted (false));
+            result->setProperty ("solo", track.isSolo (false));
+            result->setProperty ("clipCount", track.getClips().size());
+            return value;
+        };
+
+        if (command == "ping")
+        {
+            auto data = object();
+            juce::Array<juce::var> capabilities;
+            for (const auto* capability : { "ping", "status", "list-tracks", "list-notes", "capture-ui" })
+                capabilities.add (capability);
+            data.getDynamicObject()->setProperty ("protocolVersion", 1);
+            data.getDynamicObject()->setProperty ("capabilities", capabilities);
+            return musicbitmaker::liveCommandSuccess (data);
+        }
+
+        if (command == "status")
+        {
+            auto data = object();
+            auto* result = data.getDynamicObject();
+            const auto tracks = te::getAudioTracks (*edit);
+            const auto loop = loopRange();
+            result->setProperty ("project", currentProjectFile == juce::File()
+                ? juce::String() : currentProjectFile.getFullPathName());
+            result->setProperty ("projectName", currentProjectFile == juce::File()
+                ? juce::String ("Untitled") : currentProjectFile.getFileNameWithoutExtension());
+            result->setProperty ("dirty", edit->hasChangedSinceSaved());
+            result->setProperty ("playing", edit->getTransport().isPlaying());
+            result->setProperty ("recordMode", recording);
+            result->setProperty ("positionSeconds", currentPosition());
+            result->setProperty ("bpm", edit->tempoSequence.getTempo (0)->getBpm());
+            result->setProperty ("loopEnabled", static_cast<bool> (edit->getTransport().looping));
+            result->setProperty ("loopStartSeconds", loop.start);
+            result->setProperty ("loopEndSeconds", loop.end);
+            result->setProperty ("metronomeEnabled", edit->clickTrackEnabled.get());
+            result->setProperty ("trackCount", tracks.size());
+            result->setProperty ("timelineZoom", timelineLengthSeconds / timelineView.length);
+            result->setProperty ("timelineStartSeconds", timelineView.start);
+            result->setProperty ("timelineLengthSeconds", timelineView.length);
+            result->setProperty ("windowWidth", getWidth());
+            result->setProperty ("windowHeight", getHeight());
+            if (auto* track = selectedTrack())
+                result->setProperty ("selectedTrack", trackJson (*track, selectedTrackIndex));
+            else
+                result->setProperty ("selectedTrack", juce::var());
+            return musicbitmaker::liveCommandSuccess (data);
+        }
+
+        if (command == "list-tracks")
+        {
+            juce::Array<juce::var> values;
+            const auto tracks = te::getAudioTracks (*edit);
+            for (int index = 0; index < tracks.size(); ++index)
+                values.add (trackJson (*tracks[index], index));
+            auto data = object();
+            data.getDynamicObject()->setProperty ("tracks", values);
+            return musicbitmaker::liveCommandSuccess (data);
+        }
+
+        if (command == "list-notes")
+        {
+            auto* argumentsObject = arguments.getDynamicObject();
+            const auto trackID = argumentsObject != nullptr
+                ? argumentsObject->getProperty ("trackId").toString() : juce::String();
+            if (trackID.isEmpty())
+                return musicbitmaker::liveCommandFailure (
+                    "missing_track_id", "trackId is required for list-notes.");
+
+            te::AudioTrack* target = nullptr;
+            for (auto* track : te::getAudioTracks (*edit))
+                if (track->itemID.toString() == trackID)
+                    target = track;
+            if (target == nullptr)
+                return musicbitmaker::liveCommandFailure (
+                    "track_not_found", "No live track has item ID " + trackID + ".");
+
+            struct NoteInfo
+            {
+                int pitch = 0, velocity = 0, clipIndex = 0;
+                double start = 0.0, duration = 0.0;
+            };
+            std::vector<NoteInfo> notes;
+            int clipIndex = 0;
+            for (auto* clip : target->getClips())
+            {
+                if (auto* midi = dynamic_cast<te::MidiClip*> (clip))
+                    for (auto* note : midi->getSequence().getNotes())
+                    {
+                        const auto start = note->getEditStartTime (*midi).inSeconds();
+                        const auto end = note->getEditEndTime (*midi).inSeconds();
+                        notes.push_back ({ note->getNoteNumber(), note->getVelocity(), clipIndex,
+                                           start, end - start });
+                    }
+                ++clipIndex;
+            }
+            std::sort (notes.begin(), notes.end(), [] (const auto& left, const auto& right)
+            {
+                if (left.start != right.start)
+                    return left.start < right.start;
+                if (left.pitch != right.pitch)
+                    return left.pitch < right.pitch;
+                return left.duration < right.duration;
+            });
+
+            juce::Array<juce::var> values;
+            for (size_t index = 0; index < notes.size(); ++index)
+            {
+                const auto& note = notes[index];
+                auto value = object();
+                auto* result = value.getDynamicObject();
+                result->setProperty ("index", static_cast<int> (index));
+                result->setProperty ("clipIndex", note.clipIndex);
+                result->setProperty ("pitch", note.pitch);
+                result->setProperty ("name", juce::MidiMessage::getMidiNoteName (
+                    note.pitch, true, true, 4));
+                result->setProperty ("startSeconds", note.start);
+                result->setProperty ("durationSeconds", note.duration);
+                result->setProperty ("velocity", note.velocity);
+                values.add (value);
+            }
+            auto data = object();
+            data.getDynamicObject()->setProperty ("trackId", trackID);
+            data.getDynamicObject()->setProperty ("notes", values);
+            return musicbitmaker::liveCommandSuccess (data);
+        }
+
+        if (command == "capture-ui")
+        {
+            auto* argumentsObject = arguments.getDynamicObject();
+            const auto outputPath = argumentsObject != nullptr
+                ? argumentsObject->getProperty ("output").toString() : juce::String();
+            if (! juce::File::isAbsolutePath (outputPath))
+                return musicbitmaker::liveCommandFailure (
+                    "capture_failed", "capture-ui requires an absolute output path.");
+
+            const juce::File output (outputPath);
+            const auto capture = captureComponentToPng (*this, output);
+            if (! capture.ok)
+                return musicbitmaker::liveCommandFailure ("capture_failed", capture.error);
+
+            auto data = object();
+            auto* result = data.getDynamicObject();
+            result->setProperty ("path", output.getFullPathName());
+            result->setProperty ("format", "png");
+            result->setProperty ("width", capture.width);
+            result->setProperty ("height", capture.height);
+            result->setProperty ("bytes", capture.bytes);
+            return musicbitmaker::liveCommandSuccess (data);
+        }
+
+        return musicbitmaker::liveCommandFailure (
+            "unknown_command", "Unknown live command: " + command + ".");
     }
 
     void paint (juce::Graphics& graphics) override
@@ -1726,6 +2209,9 @@ public:
         drawStatus (graphics);
         drawMasterMeter (graphics);
         drawTrackManager (graphics);
+        drawLoopRuler (graphics);
+        drawTimeRuler (graphics);
+        drawTimelineViewControls (graphics);
         drawTimeline (graphics);
     }
 
@@ -1733,14 +2219,10 @@ public:
     {
         menuBar.setBounds (0, 0, getWidth(), 24);
         auto controls = juce::Rectangle<int> (contentLeft, 92, getWidth() - contentLeft - 24, 42);
-        recordButton.setBounds (controls.removeFromLeft (82).reduced (2));
-        playButton.setBounds (controls.removeFromLeft (62).reduced (2));
-        stopButton.setBounds (controls.removeFromLeft (62).reduced (2));
+        recordButton.setBounds (controls.removeFromLeft (78).reduced (2));
+        playButton.setBounds (controls.removeFromLeft (92).reduced (2));
+        loopButton.setBounds (controls.removeFromLeft (88).reduced (2));
         deleteButton.setBounds (controls.removeFromLeft (88).reduced (2));
-        kickButton.setBounds (controls.removeFromLeft (72).reduced (2));
-        snareButton.setBounds (controls.removeFromLeft (72).reduced (2));
-        closedHatButton.setBounds (controls.removeFromLeft (72).reduced (2));
-        openHatButton.setBounds (controls.removeFromLeft (72).reduced (2));
         settingsButton.setBounds (getWidth() - 206, 26, 176, 34);
 
         addTrackButton.setBounds (24, 92, 212, 34);
@@ -1748,6 +2230,11 @@ public:
         panSlider.setBounds (contentLeft + 154, 154, 150, 30);
         muteButton.setBounds (contentLeft + 308, 154, 70, 30);
         soloButton.setBounds (contentLeft + 382, 154, 70, 30);
+        metronomeButton.setBounds (24, 134, 92, 30);
+        tempoSlider.setBounds (118, 134, 118, 30);
+        zoomSlider.setBounds (contentLeft + 526, 154,
+                              juce::jmax (100, getWidth() - contentLeft - 550), 30);
+        timelineScrollBar.setBounds (getTimelineScrollBarBounds());
     }
 
     bool keyPressed (const juce::KeyPress& key) override
@@ -1785,6 +2272,8 @@ public:
         }
 
         const auto keyCode = canonicalShortcutKey (key);
+        if (handleTransportShortcut (keyCode))
+            return true;
         if (keyCode == shortcutMap.keys[ShortcutMap::octaveDown]
             || keyCode == shortcutMap.keys[ShortcutMap::octaveUp])
         {
@@ -1812,14 +2301,6 @@ public:
                 return true;
             }
         }
-
-        if (keyCode != 0 && keyCode == shortcutMap.keys[ShortcutMap::kickAlternate])
-        {
-            if (! drumKeysDown[4])
-                triggerDrum (0, true);
-            drumKeysDown[4] = true;
-            return true;
-        }
         return false;
     }
 
@@ -1833,11 +2314,11 @@ public:
         }
         for (size_t index = 0; index < drumKeysDown.size(); ++index)
         {
-            const auto action = index < 4 ? ShortcutMap::drumBase + index : ShortcutMap::kickAlternate;
-            const auto keyCode = shortcutMap.keys[action];
+            const auto keyCode = shortcutMap.keys[ShortcutMap::drumBase + index];
             if (keyCode == 0 || ! juce::KeyPress::isKeyCurrentlyDown (keyCode))
                 drumKeysDown[index] = false;
         }
+        updateTransportShortcutKeyStates();
         repaint();
         return true;
     }
@@ -1854,8 +2335,28 @@ public:
             if (const auto trackIndex = trackIndexAt (event.getPosition()); trackIndex >= 0)
             {
                 selectTrack (trackIndex);
-                showTrackContextMenu();
+                selectedNote = getTimelineContentBounds (trackIndex).contains (event.position)
+                    ? findTimelineNote (event.position) : nullptr;
+                if (selectedNote != nullptr)
+                    showNoteContextMenu();
+                else
+                    showTrackContextMenu();
+                updateButtonStates();
+                repaint();
             }
+            return;
+        }
+
+        if (getLoopRulerBounds().contains (event.getPosition()))
+        {
+            beginLoopDrag (event.position.x);
+            return;
+        }
+
+        if (getTimeRulerBounds().contains (event.getPosition()))
+        {
+            draggingPlayhead = true;
+            movePlayheadTo (event.position.x);
             return;
         }
 
@@ -1872,14 +2373,15 @@ public:
         if (trackIndex >= 0)
         {
             selectTrack (trackIndex);
-            if (event.position.x >= contentLeft)
+            if (getTimelineContentBounds (trackIndex).contains (event.position))
             {
                 selectedNote = findTimelineNote (event.position);
                 if (selectedNote != nullptr)
                 {
                     dragStart = event.position;
                     dragOriginal = toTimelineNote (*selectedNote);
-                    resizingNote = noteBounds (dragOriginal).getRight() - event.position.x <= 8.0f;
+                    resizingNote = displayedNoteBounds (*selectedNote, *midiClip, selectedTrackIndex).getRight()
+                                     - event.position.x <= 8.0f;
                     draggingNote = true;
                     statusMessage = resizingNote ? "Resize note" : "Move note";
                 }
@@ -1895,7 +2397,11 @@ public:
 
     void mouseDrag (const juce::MouseEvent& event) override
     {
-        if (resizingTrackIndex >= 0)
+        if (loopDragMode != LoopDragMode::none)
+        {
+            updateLoopDrag (event.position.x);
+        }
+        else if (resizingTrackIndex >= 0)
         {
             const auto tracks = te::getAudioTracks (*edit);
             if (juce::isPositiveAndBelow (resizingTrackIndex, tracks.size()))
@@ -1914,10 +2420,19 @@ public:
             else if (draggingPlayhead)
                 movePlayheadTo (event.position.x);
         }
+        else if (draggingPlayhead && getTimeRulerBounds().contains (event.getMouseDownPosition()))
+        {
+            movePlayheadTo (event.position.x);
+        }
     }
 
     void mouseUp (const juce::MouseEvent&) override
     {
+        if (loopDragMode != LoopDragMode::none)
+        {
+            loopDragMode = LoopDragMode::none;
+            statusMessage = loopStatusText();
+        }
         if (resizingTrackIndex >= 0)
         {
             statusMessage = "Track height updated";
@@ -1932,9 +2447,12 @@ public:
 
     void mouseMove (const juce::MouseEvent& event) override
     {
-        setMouseCursor (trackBoundaryAt (event.getPosition()) >= 0
-                            ? juce::MouseCursor::UpDownResizeCursor
-                            : juce::MouseCursor::NormalCursor);
+        if (getLoopRulerBounds().contains (event.getPosition()))
+            setMouseCursor (juce::MouseCursor::LeftRightResizeCursor);
+        else
+            setMouseCursor (trackBoundaryAt (event.getPosition()) >= 0
+                                ? juce::MouseCursor::UpDownResizeCursor
+                                : juce::MouseCursor::NormalCursor);
     }
 
     void mouseExit (const juce::MouseEvent&) override
@@ -2015,7 +2533,12 @@ private:
     }
 
     static constexpr int contentLeft = 260;
-    static constexpr int trackRowTop = 194;
+    static constexpr int loopRulerTop = 194;
+    static constexpr int loopRulerHeight = 26;
+    static constexpr int timeRulerHeight = 28;
+    static constexpr int timelineScrollBarHeight = 16;
+    static constexpr int trackRowTop = loopRulerTop + loopRulerHeight + timeRulerHeight
+                                     + timelineScrollBarHeight;
 
     te::AudioTrack* selectedTrack() const
     {
@@ -2208,7 +2731,19 @@ private:
                            : juce::jlimit (0, tracks.size() - 1, selectedTrackIndex);
         midiClip = selectedTrack() != nullptr ? createMidiClip (*selectedTrack()) : nullptr;
         edit->playInStopEnabled = true;
+        const auto storedLoop = edit->getTransport().getLoopRange();
+        const auto storedStart = storedLoop.getStart().inSeconds();
+        const auto storedEnd = storedLoop.getEnd().inSeconds();
+        const auto usableLoop = storedEnd - storedStart >= minimumLoopLengthSeconds
+                              ? normaliseLoopRange (storedStart, storedEnd)
+                              : LoopRangeSeconds {};
+        edit->getTransport().setLoopRange ({
+            tracktion::TimePosition::fromSeconds (usableLoop.start),
+            tracktion::TimePosition::fromSeconds (usableLoop.end) });
+        edit->clickTrackRecordingOnly = false;
+        edit->clickTrackEmphasiseBars = true;
         edit->getTransport().ensureContextAllocated (true);
+        setTimelineView ({ 0.0, timelineLengthSeconds });
     }
 
     void selectTrack (int index)
@@ -2493,9 +3028,31 @@ private:
         });
     }
 
+    void showNoteContextMenu()
+    {
+        if (selectedNote == nullptr)
+            return;
+
+        juce::PopupMenu menu;
+        menu.addItem (1, "Octave Up (+12)", canMovePitchByOctave (selectedNote->getNoteNumber(), 1));
+        menu.addItem (2, "Octave Down (-12)", canMovePitchByOctave (selectedNote->getNoteNumber(), -1));
+        menu.addSeparator();
+        menu.addItem (3, "Delete Note");
+        juce::Component::SafePointer<MainComponent> safeThis (this);
+        menu.showMenuAsync ({}, [safeThis] (int result)
+        {
+            if (safeThis == nullptr)
+                return;
+            if (result == 1) safeThis->moveSelectedNoteByOctave (1);
+            else if (result == 2) safeThis->moveSelectedNoteByOctave (-1);
+            else if (result == 3) safeThis->deleteSelectedNote();
+        });
+    }
+
     void syncTrackControls()
     {
         juce::ScopedValueSetter<bool> guard (updatingTrackControls, true);
+        juce::ScopedValueSetter<bool> projectGuard (updatingProjectControls, true);
         if (auto* track = selectedTrack())
         {
             if (auto* volume = track->getVolumePlugin())
@@ -2506,6 +3063,8 @@ private:
             muteButton.setToggleState (track->isMuted (false), juce::dontSendNotification);
             soloButton.setToggleState (track->isSolo (false), juce::dontSendNotification);
         }
+        metronomeButton.setToggleState (edit->clickTrackEnabled.get(), juce::dontSendNotification);
+        tempoSlider.setValue (edit->tempoSequence.getTempo (0)->getBpm(), juce::dontSendNotification);
         syncKeyboardWindow();
     }
 
@@ -2539,14 +3098,6 @@ private:
         repaint();
     }
 
-    void updateShortcutLabels()
-    {
-        kickButton.setButtonText ("KICK " + shortcutKeyName (shortcutMap.keys[ShortcutMap::drumBase]));
-        snareButton.setButtonText ("SNARE " + shortcutKeyName (shortcutMap.keys[ShortcutMap::drumBase + 1]));
-        closedHatButton.setButtonText ("HAT " + shortcutKeyName (shortcutMap.keys[ShortcutMap::drumBase + 2]));
-        openHatButton.setButtonText ("HAT " + shortcutKeyName (shortcutMap.keys[ShortcutMap::drumBase + 3]));
-    }
-
     int scaleRoot() const
     {
         return juce::jlimit (0, 11, static_cast<int> (edit->state.getProperty (scaleRootProperty, 0)));
@@ -2561,9 +3112,9 @@ private:
     {
         releaseAllLiveNotes ("shortcut-profile-change");
         shortcutMap = shortcutProfiles[shortcutProfileIndex (rootIndex, scaleIndex)];
+        transportShortcutKeysDown.fill (false);
         if (keyboardWindow != nullptr)
             keyboardWindow->shortcutsChanged();
-        updateShortcutLabels();
     }
 
     void applyShortcutProfiles (const ShortcutProfiles& profiles)
@@ -2666,11 +3217,48 @@ private:
 
         const auto content = getTimelineContentBounds (trackIndex);
         const auto laneHeight = content.getHeight() / static_cast<float> (timelineLaneCount (trackIndex));
-        const auto x = content.getX() + content.getWidth()
-            * static_cast<float> (note.startSeconds / timelineLengthSeconds);
+        const auto x = timelineXAt (note.startSeconds);
         const auto width = juce::jmax (4.0f, content.getWidth()
-            * static_cast<float> ((note.endSeconds - note.startSeconds) / timelineLengthSeconds));
+            * static_cast<float> ((note.endSeconds - note.startSeconds) / timelineView.length));
         return { x, content.getY() + lane * laneHeight + 2.0f, width, laneHeight - 4.0f };
+    }
+
+    juce::Rectangle<float> displayedNoteBounds (const te::MidiNote& target, const te::MidiClip& clip,
+                                                int trackIndex) const
+    {
+        auto bounds = noteBounds (toTimelineNote (target, clip), trackIndex);
+        const auto tracks = te::getAudioTracks (*edit);
+        if (bounds.isEmpty() || ! juce::isPositiveAndBelow (trackIndex, tracks.size())
+            || drumIndexFor (*tracks[trackIndex]) >= 0)
+            return bounds;
+
+        const auto targetNote = toTimelineNote (target, clip);
+        // ponytail: UI-only O(n^2) grouping is enough for the 16-second prototype; cache layouts for large clips.
+        std::vector<const te::MidiNote*> overlapping;
+        for (auto* note : clip.getSequence().getNotes())
+        {
+            const auto candidate = toTimelineNote (*note, clip);
+            if (pianoRollLaneForPitch (candidate.pitch) == pianoRollLaneForPitch (targetNote.pitch)
+                && candidate.startSeconds < targetNote.endSeconds
+                && candidate.endSeconds > targetNote.startSeconds)
+                overlapping.push_back (note);
+        }
+        if (overlapping.size() < 2)
+            return bounds;
+
+        std::stable_sort (overlapping.begin(), overlapping.end(), [] (const auto* left, const auto* right)
+        {
+            return left->getNoteNumber() < right->getNoteNumber();
+        });
+        const auto found = std::find (overlapping.begin(), overlapping.end(), &target);
+        if (found == overlapping.end())
+            return bounds;
+
+        const auto slot = static_cast<float> (std::distance (overlapping.begin(), found));
+        const auto slotHeight = bounds.getHeight() / static_cast<float> (overlapping.size());
+        bounds.setY (bounds.getY() + slot * slotHeight);
+        bounds.setHeight (juce::jmax (1.0f, slotHeight));
+        return bounds;
     }
 
     juce::Rectangle<float> noteBounds (const TimelineNote& note) const
@@ -2683,9 +3271,15 @@ private:
         if (midiClip == nullptr)
             return nullptr;
 
+        const auto content = getTimelineContentBounds();
         const auto& notes = midiClip->getSequence().getNotes();
         for (int index = notes.size(); --index >= 0;)
-            if (noteBounds (toTimelineNote (*notes[index])).expanded (2.0f).contains (position))
+            if (timelineItemContainsPoint (content,
+                    displayedNoteBounds (*notes[index], *midiClip, selectedTrackIndex), position))
+                return notes[index];
+        for (int index = notes.size(); --index >= 0;)
+            if (timelineItemContainsPoint (content,
+                    displayedNoteBounds (*notes[index], *midiClip, selectedTrackIndex), position, 2.0f))
                 return notes[index];
 
         return nullptr;
@@ -2701,7 +3295,7 @@ private:
         const auto lane = juce::jlimit (0, count - 1,
                                         static_cast<int> ((y - content.getY())
                                             / (content.getHeight() / count)));
-        return timelinePitchRange (selectedTrackIndex).first + lane;
+        return pitchOnPianoRollLane (dragOriginal.pitch, lane);
     }
 
     void dragSelectedNote (juce::Point<float> position)
@@ -2710,7 +3304,7 @@ private:
             return;
 
         const auto delta = (position.x - dragStart.x) / getTimelineContentBounds().getWidth()
-                         * timelineLengthSeconds;
+                         * timelineView.length;
         auto edited = editNoteRange (dragOriginal, delta, resizingNote);
         edited.pitch = resizingNote ? dragOriginal.pitch : pitchForY (position.y);
 
@@ -2733,6 +3327,18 @@ private:
         draggingNote = false;
         statusMessage = "Note deleted";
         updateButtonStates();
+        repaint();
+        grabKeyboardFocus();
+    }
+
+    void moveSelectedNoteByOctave (int octaveDelta)
+    {
+        if (selectedNote == nullptr || ! canMovePitchByOctave (selectedNote->getNoteNumber(), octaveDelta))
+            return;
+
+        selectedNote->setNoteNumber (selectedNote->getNoteNumber() + octaveDelta * pianoRollLaneCount,
+                                     &edit->getUndoManager());
+        statusMessage = "Note moved to " + compactPitchLabel (selectedNote->getNoteNumber());
         repaint();
         grabKeyboardFocus();
     }
@@ -2814,10 +3420,7 @@ private:
     void saveProject()
     {
         if (recording)
-        {
             finishOpenNotes (currentPosition());
-            recording = false;
-        }
 
         auto operations = te::EditFileOperations (*edit);
         bool saved = false;
@@ -2850,10 +3453,7 @@ private:
     void saveProjectAs()
     {
         if (recording)
-        {
             finishOpenNotes (currentPosition());
-            recording = false;
-        }
 
         const auto suggested = currentProjectFile == juce::File()
                              ? juce::File::getSpecialLocation (juce::File::userDocumentsDirectory)
@@ -2921,26 +3521,71 @@ private:
     void toggleRecording()
     {
         recording = ! recording;
-        logInstrumentEvent ("recording " + juce::String (recording ? "started" : "stopped")
+        logInstrumentEvent ("record-mode " + juce::String (recording ? "enabled" : "disabled")
                             + " position=" + juce::String (currentPosition(), 3));
         if (recording)
         {
             if (currentPosition() >= timelineLengthSeconds - 0.02)
                 edit->getTransport().setPosition (tracktion::TimePosition::fromSeconds (0.0));
-            startPlayback();
+            statusMessage = "Record mode ready - play or enter notes at the playhead";
         }
         else
         {
             finishOpenNotes (currentPosition());
+            statusMessage = "Record mode off";
         }
         updateButtonStates();
+        repaint();
         grabKeyboardFocus();
     }
 
-    void startPlayback()
+    bool handleTransportShortcut (int keyCode)
+    {
+        constexpr std::array<size_t, 2> actions { ShortcutMap::playStop, ShortcutMap::loop };
+        for (size_t index = 0; index < actions.size(); ++index)
+        {
+            if (keyCode == 0 || keyCode != shortcutMap.keys[actions[index]])
+                continue;
+            if (! transportShortcutKeysDown[index])
+            {
+                transportShortcutKeysDown[index] = true;
+                if (actions[index] == ShortcutMap::playStop)
+                    togglePlayback (false);
+                else
+                    setLooping (! edit->getTransport().looping, false);
+            }
+            return true;
+        }
+        return false;
+    }
+
+    void updateTransportShortcutKeyStates()
+    {
+        constexpr std::array<size_t, 2> actions { ShortcutMap::playStop, ShortcutMap::loop };
+        for (size_t index = 0; index < actions.size(); ++index)
+        {
+            const auto keyCode = shortcutMap.keys[actions[index]];
+            if (keyCode == 0 || ! juce::KeyPress::isKeyCurrentlyDown (keyCode))
+                transportShortcutKeysDown[index] = false;
+        }
+    }
+
+    void togglePlayback (bool takeKeyboardFocus = true)
+    {
+        if (edit->getTransport().isPlaying())
+            stopPlayback (takeKeyboardFocus);
+        else
+            startPlayback (takeKeyboardFocus);
+    }
+
+    void startPlayback (bool takeKeyboardFocus = true)
     {
         auto& transport = edit->getTransport();
-        if (currentPosition() >= timelineLengthSeconds - 0.02)
+        const auto loop = loopRange();
+        if (transport.looping
+            && (currentPosition() < loop.start || currentPosition() >= loop.end))
+            transport.setPosition (tracktion::TimePosition::fromSeconds (loop.start));
+        else if (currentPosition() >= timelineLengthSeconds - 0.02)
             transport.setPosition (tracktion::TimePosition::fromSeconds (0.0));
         if (! transport.isPlaying())
             transport.play (false);
@@ -2951,20 +3596,21 @@ private:
                                 + " " + instrumentStateForLog (*track));
         }
         updateButtonStates();
-        grabKeyboardFocus();
+        if (takeKeyboardFocus)
+            grabKeyboardFocus();
     }
 
-    void stopPlayback()
+    void stopPlayback (bool takeKeyboardFocus = true)
     {
         auto& transport = edit->getTransport();
         logInstrumentEvent ("transport-stop position=" + juce::String (currentPosition(), 3));
         finishOpenNotes (currentPosition());
-        recording = false;
         transport.stop (false, false);
         transport.setPosition (tracktion::TimePosition::fromSeconds (0.0));
         updateButtonStates();
         repaint();
-        grabKeyboardFocus();
+        if (takeKeyboardFocus)
+            grabKeyboardFocus();
     }
 
     double currentPosition() const
@@ -3005,12 +3651,20 @@ private:
         }
         if (recording)
         {
+            const auto wallClockSeconds = juce::Time::getMillisecondCounterHiRes() / 1000.0;
             if (down)
-                recordingStarts[index] = currentPosition();
+            {
+                recordingStarts[index] = recordedNoteStart (currentPosition());
+                recordingWallClockStarts[index] = wallClockSeconds;
+            }
             else if (recordingStarts[index] >= 0.0)
             {
-                addRecordedNote (keyboardPitch (index, keyboardOctave()), recordingStarts[index], currentPosition());
+                const auto heldSeconds = recordingWallClockStarts[index] >= 0.0
+                    ? wallClockSeconds - recordingWallClockStarts[index] : 0.0;
+                addRecordedNote (keyboardPitch (index, keyboardOctave()), recordingStarts[index],
+                                 recordedNoteEnd (recordingStarts[index], currentPosition(), heldSeconds));
                 recordingStarts[index] = -1.0;
+                recordingWallClockStarts[index] = -1.0;
             }
         }
         repaint();
@@ -3018,14 +3672,30 @@ private:
 
     void finishOpenNotes (double endSeconds)
     {
+        const auto wallClockSeconds = juce::Time::getMillisecondCounterHiRes() / 1000.0;
         for (size_t index = 0; index < recordingStarts.size(); ++index)
         {
             if (recordingStarts[index] >= 0.0)
             {
-                addRecordedNote (keyboardPitch (index, keyboardOctave()), recordingStarts[index], endSeconds);
+                const auto heldSeconds = recordingWallClockStarts[index] >= 0.0
+                    ? wallClockSeconds - recordingWallClockStarts[index] : 0.0;
+                addRecordedNote (keyboardPitch (index, keyboardOctave()), recordingStarts[index],
+                                 recordedNoteEnd (recordingStarts[index], endSeconds, heldSeconds));
                 recordingStarts[index] = -1.0;
+                recordingWallClockStarts[index] = -1.0;
             }
         }
+    }
+
+    void restartOpenNotes (double startSeconds)
+    {
+        const auto wallClockSeconds = juce::Time::getMillisecondCounterHiRes() / 1000.0;
+        for (size_t index = 0; index < recordingStarts.size(); ++index)
+            if (keyboardNotesDown[index])
+            {
+                recordingStarts[index] = recordedNoteStart (startSeconds);
+                recordingWallClockStarts[index] = wallClockSeconds;
+            }
     }
 
     void triggerDrum (int drumIndex, bool recordEvent)
@@ -3055,7 +3725,10 @@ private:
                 }
         });
         if (recordEvent && recording)
-            addRecordedNote (*track, drum.midiNote, currentPosition(), currentPosition() + drum.durationSeconds);
+        {
+            const auto start = recordedNoteStart (currentPosition());
+            addRecordedNote (*track, drum.midiNote, start, start + drum.durationSeconds);
+        }
         statusMessage = juce::String (drum.name) + " triggered";
         repaint();
     }
@@ -3077,20 +3750,152 @@ private:
         repaint();
     }
 
+    LoopRangeSeconds loopRange() const
+    {
+        const auto range = edit->getTransport().getLoopRange();
+        return normaliseLoopRange (range.getStart().inSeconds(), range.getEnd().inSeconds());
+    }
+
+    void setLoopRange (LoopRangeSeconds range)
+    {
+        range = normaliseLoopRange (range.start, range.end);
+        edit->getTransport().setLoopRange ({
+            tracktion::TimePosition::fromSeconds (range.start),
+            tracktion::TimePosition::fromSeconds (range.end) });
+        repaint();
+    }
+
+    void setLooping (bool enabled, bool takeKeyboardFocus = true)
+    {
+        edit->getTransport().looping = enabled;
+        statusMessage = enabled ? loopStatusText() : "Loop playback off";
+        updateButtonStates();
+        repaint();
+        if (takeKeyboardFocus)
+            grabKeyboardFocus();
+    }
+
+    void setMetronomeEnabled (bool enabled)
+    {
+        edit->clickTrackEnabled = enabled;
+        edit->clickTrackRecordingOnly = false;
+        statusMessage = enabled ? "Metronome on - clicks play with transport"
+                                : "Metronome off";
+        updateButtonStates();
+        repaint();
+        grabKeyboardFocus();
+    }
+
+    juce::String loopStatusText() const
+    {
+        const auto range = loopRange();
+        return "Loop " + juce::String (range.start, 2) + " - "
+             + juce::String (range.end, 2) + " sec";
+    }
+
+    juce::Rectangle<int> getLoopRulerBounds() const
+    {
+        return { contentLeft, loopRulerTop, getWidth() - contentLeft - 24, loopRulerHeight };
+    }
+
+    juce::Rectangle<int> getTimeRulerBounds() const
+    {
+        return { contentLeft, loopRulerTop + loopRulerHeight,
+                 getWidth() - contentLeft - 24, timeRulerHeight };
+    }
+
+    juce::Rectangle<int> getTimelineScrollBarBounds() const
+    {
+        return { contentLeft + 64, loopRulerTop + loopRulerHeight + timeRulerHeight,
+                 getWidth() - contentLeft - 88, timelineScrollBarHeight };
+    }
+
+    juce::Rectangle<float> getTimelineHorizontalBounds() const
+    {
+        return getLoopRulerBounds().withTrimmedLeft (64).toFloat();
+    }
+
+    double timelineTimeAt (float x) const
+    {
+        const auto timeline = getTimelineHorizontalBounds();
+        return timelineTimeForProportion (
+            timelineView, static_cast<double> (x - timeline.getX()) / timeline.getWidth());
+    }
+
+    float timelineXAt (double seconds) const
+    {
+        const auto timeline = getTimelineHorizontalBounds();
+        return timeline.getX() + timeline.getWidth()
+            * static_cast<float> (timelineProportionForTime (timelineView, seconds));
+    }
+
+    void setTimelineView (TimelineViewRange newView)
+    {
+        timelineView = normaliseTimelineView (newView.start, newView.length);
+        zoomSlider.setValue (timelineLengthSeconds / timelineView.length,
+                             juce::dontSendNotification);
+        timelineScrollBar.setCurrentRange (timelineView.start, timelineView.length,
+                                           juce::dontSendNotification);
+        repaint();
+    }
+
+    void scrollBarMoved (juce::ScrollBar* scrollBar, double newRangeStart) override
+    {
+        if (scrollBar == &timelineScrollBar)
+            setTimelineView ({ newRangeStart, timelineView.length });
+    }
+
+    void beginLoopDrag (float x)
+    {
+        const auto range = loopRange();
+        const auto startX = timelineXAt (range.start);
+        const auto endX = timelineXAt (range.end);
+        constexpr float handleWidth = 8.0f;
+        loopDragOriginal = range;
+        loopDragAnchorSeconds = timelineTimeAt (x);
+
+        if (std::abs (x - startX) <= handleWidth)
+            loopDragMode = LoopDragMode::resizeStart;
+        else if (std::abs (x - endX) <= handleWidth)
+            loopDragMode = LoopDragMode::resizeEnd;
+        else if (x > startX && x < endX)
+            loopDragMode = LoopDragMode::move;
+        else
+        {
+            loopDragMode = LoopDragMode::create;
+            loopDragOriginal = { loopDragAnchorSeconds, loopDragAnchorSeconds };
+            setLoopRange ({ loopDragAnchorSeconds, loopDragAnchorSeconds + minimumLoopLengthSeconds });
+        }
+        statusMessage = "Drag loop start, end, or range";
+    }
+
+    void updateLoopDrag (float x)
+    {
+        const auto time = timelineTimeAt (x);
+        if (loopDragMode == LoopDragMode::create)
+            setLoopRange ({ loopDragAnchorSeconds, time });
+        else if (loopDragMode == LoopDragMode::resizeStart)
+            setLoopRange ({ juce::jmin (time, loopDragOriginal.end - minimumLoopLengthSeconds),
+                            loopDragOriginal.end });
+        else if (loopDragMode == LoopDragMode::resizeEnd)
+            setLoopRange ({ loopDragOriginal.start,
+                            juce::jmax (time, loopDragOriginal.start + minimumLoopLengthSeconds) });
+        else if (loopDragMode == LoopDragMode::move)
+            setLoopRange (moveLoopRange (loopDragOriginal, time - loopDragAnchorSeconds));
+    }
+
     void movePlayheadTo (float mouseX)
     {
-        auto timeline = getTimelineContentBounds();
-        const auto proportion = juce::jlimit (0.0, 1.0,
-            static_cast<double> (mouseX - timeline.getX()) / timeline.getWidth());
         finishOpenNotes (currentPosition());
         edit->getTransport().setPosition (
-            tracktion::TimePosition::fromSeconds (proportion * timelineLengthSeconds));
+            tracktion::TimePosition::fromSeconds (timelineTimeAt (mouseX)));
         repaint();
     }
 
     void timerCallback() override
     {
         drainAudioCapture();
+        updateTransportShortcutKeyStates();
         if (auto* safety = masterSafety())
         {
             masterOutputPeak = juce::jmax (safety->takeOutputPeak(), masterOutputPeak * 0.88f);
@@ -3100,15 +3905,23 @@ private:
                 --masterProtectionHold;
         }
         const auto isPlaying = edit->getTransport().isPlaying();
-        if (lastUiPlaying && ! isPlaying && recording)
+        const auto position = currentPosition();
+        if (recording && didLoopPlaybackWrap (lastUiPlaying, isPlaying,
+                                              edit->getTransport().looping,
+                                              lastUiPosition, position))
         {
-            finishOpenNotes (currentPosition());
-            recording = false;
+            const auto loop = loopRange();
+            finishOpenNotes (loop.end);
+            restartOpenNotes (loop.start);
         }
-        if (isPlaying && currentPosition() >= timelineLengthSeconds - 0.02)
+        if (lastUiPlaying && ! isPlaying && recording)
+            finishOpenNotes (position);
+        if (isPlaying && ! edit->getTransport().looping
+            && position >= timelineLengthSeconds - 0.02)
             stopPlayback();
 
         lastUiPlaying = isPlaying;
+        lastUiPosition = position;
         updateButtonStates();
         repaint();
         if (keyboardWindow != nullptr)
@@ -3119,8 +3932,11 @@ private:
     {
         recordButton.setToggleState (recording, juce::dontSendNotification);
         playButton.setToggleState (edit->getTransport().isPlaying(), juce::dontSendNotification);
-        recordButton.setButtonText (recording ? "RECORDING" : "RECORD");
-        playButton.setButtonText (edit->getTransport().isPlaying() ? "PLAYING" : "PLAY");
+        loopButton.setToggleState (edit->getTransport().looping, juce::dontSendNotification);
+        metronomeButton.setToggleState (edit->clickTrackEnabled.get(), juce::dontSendNotification);
+        playButton.setButtonText (edit->getTransport().isPlaying() ? "STOP" : "PLAY");
+        loopButton.setButtonText (edit->getTransport().looping ? "LOOP ON" : "LOOP");
+        metronomeButton.setButtonText (edit->clickTrackEnabled.get() ? "METRO ON" : "METRO");
         deleteButton.setEnabled (selectedNote != nullptr);
     }
 
@@ -3164,29 +3980,13 @@ private:
         return getTimelineContentBounds (selectedTrackIndex);
     }
 
-    std::pair<int, int> timelinePitchRange (int trackIndex) const
-    {
-        auto low = keyboardPitch (0, keyboardOctave());
-        auto high = keyboardPitch (midiNotes.size() - 1, keyboardOctave());
-        const auto tracks = te::getAudioTracks (*edit);
-        if (juce::isPositiveAndBelow (trackIndex, tracks.size()))
-            if (auto* clip = findMidiClip (*tracks[trackIndex]))
-                for (auto* note : clip->getSequence().getNotes())
-                {
-                    low = juce::jmin (low, note->getNoteNumber());
-                    high = juce::jmax (high, note->getNoteNumber());
-                }
-        return { low, high };
-    }
-
     int timelineLaneCount (int trackIndex) const
     {
         const auto tracks = te::getAudioTracks (*edit);
         if (juce::isPositiveAndBelow (trackIndex, tracks.size())
             && drumIndexFor (*tracks[trackIndex]) >= 0)
             return 1;
-        const auto range = timelinePitchRange (trackIndex);
-        return range.second - range.first + 1;
+        return pianoRollLaneCount;
     }
 
     int laneForPitch (int pitch, int trackIndex) const
@@ -3197,8 +3997,7 @@ private:
             if (const auto drumIndex = drumIndexFor (*tracks[trackIndex]); drumIndex >= 0)
                 return pitch == drumPresets[static_cast<size_t> (drumIndex)].midiNote ? 0 : -1;
         }
-        const auto range = timelinePitchRange (trackIndex);
-        return pitch >= range.first && pitch <= range.second ? pitch - range.first : -1;
+        return pianoRollLaneForPitch (pitch);
     }
 
     int laneForPitch (int pitch) const
@@ -3208,7 +4007,9 @@ private:
 
     void drawStatus (juce::Graphics& graphics)
     {
-        const auto state = recording ? "RECORDING" : edit->getTransport().isPlaying() ? "PLAYING" : "STOPPED";
+        const auto state = recording
+            ? (edit->getTransport().isPlaying() ? "RECORDING" : "RECORD READY")
+            : edit->getTransport().isPlaying() ? "PLAYING" : "STOPPED";
         auto project = currentProjectFile == juce::File() ? juce::String ("Untitled")
                                                            : currentProjectFile.getFileNameWithoutExtension();
         if (edit->hasChangedSinceSaved())
@@ -3224,6 +4025,10 @@ private:
         graphics.drawText (statusMessage.isNotEmpty() ? statusMessage
                                                        : "Edit > Shortcuts... | Assigned keys are shown on the keyboard",
                            contentLeft, 134, getWidth() - contentLeft - 24, 18, juce::Justification::centredLeft);
+        graphics.setColour (juce::Colour::fromRGB (151, 160, 180));
+        graphics.setFont (juce::FontOptions (10.0f, juce::Font::bold));
+        graphics.drawText ("TIME ZOOM", contentLeft + 456, 154, 68, 30,
+                           juce::Justification::centredLeft);
     }
 
     void drawMasterMeter (juce::Graphics& graphics)
@@ -3285,6 +4090,102 @@ private:
         graphics.restoreState();
     }
 
+    void drawLoopRuler (juce::Graphics& graphics)
+    {
+        const auto bounds = getLoopRulerBounds();
+        const auto timeline = getTimelineHorizontalBounds();
+        const auto range = loopRange();
+        const auto active = static_cast<bool> (edit->getTransport().looping);
+        const auto accent = active ? juce::Colour::fromRGB (105, 225, 180)
+                                   : juce::Colour::fromRGB (112, 123, 145);
+
+        graphics.setColour (juce::Colour::fromRGB (29, 34, 45));
+        graphics.fillRoundedRectangle (bounds.toFloat(), 5.0f);
+        graphics.setColour (juce::Colour::fromRGB (172, 181, 201));
+        graphics.setFont (juce::FontOptions (10.0f, juce::Font::bold));
+        graphics.drawText ("LOOP RANGE", bounds.withWidth (64), juce::Justification::centred);
+        graphics.saveState();
+        graphics.reduceClipRegion (timeline.getSmallestIntegerContainer());
+
+        const auto firstSecond = juce::jmax (0, static_cast<int> (std::ceil (timelineView.start)));
+        const auto lastSecond = juce::jmin (static_cast<int> (timelineLengthSeconds),
+                                             static_cast<int> (std::floor (timelineView.start
+                                                                            + timelineView.length)));
+        for (int second = firstSecond; second <= lastSecond; ++second)
+        {
+            const auto x = timelineXAt (second);
+            graphics.setColour (second % 4 == 0 ? juce::Colour::fromRGB (91, 101, 123)
+                                                 : juce::Colour::fromRGB (56, 64, 80));
+            graphics.drawVerticalLine (juce::roundToInt (x), timeline.getY(), timeline.getBottom());
+        }
+
+        const auto startX = timelineXAt (range.start);
+        const auto endX = timelineXAt (range.end);
+        const auto selection = juce::Rectangle<float> {
+            startX, timeline.getY() + 3.0f, endX - startX, timeline.getHeight() - 6.0f };
+        graphics.setColour (accent.withAlpha (active ? 0.48f : 0.28f));
+        graphics.fillRoundedRectangle (selection, 3.0f);
+        graphics.setColour (accent);
+        graphics.drawRoundedRectangle (selection, 3.0f, 1.5f);
+        graphics.fillRect (startX - 2.0f, selection.getY(), 4.0f, selection.getHeight());
+        graphics.fillRect (endX - 2.0f, selection.getY(), 4.0f, selection.getHeight());
+        graphics.setFont (juce::FontOptions (10.0f, juce::Font::bold));
+        graphics.drawText (juce::String (range.start, 2) + " - " + juce::String (range.end, 2) + "s",
+                           selection.reduced (7.0f, 0.0f), juce::Justification::centred, true);
+        graphics.restoreState();
+    }
+
+    void drawTimeRuler (juce::Graphics& graphics)
+    {
+        const auto bounds = getTimeRulerBounds();
+        const auto timeline = getTimelineHorizontalBounds();
+        graphics.setColour (juce::Colour::fromRGB (24, 28, 37));
+        graphics.fillRect (bounds);
+        graphics.setColour (juce::Colour::fromRGB (172, 181, 201));
+        graphics.setFont (juce::FontOptions (10.0f, juce::Font::bold));
+        graphics.drawText ("TIME", bounds.withWidth (64), juce::Justification::centred);
+
+        const auto firstSecond = juce::jmax (0, static_cast<int> (std::ceil (timelineView.start)));
+        const auto lastSecond = juce::jmin (static_cast<int> (timelineLengthSeconds),
+                                             static_cast<int> (std::floor (timelineView.start
+                                                                            + timelineView.length)));
+        for (int second = firstSecond; second <= lastSecond; ++second)
+        {
+            const auto x = timelineXAt (second);
+            const auto major = second % 5 == 0;
+            graphics.setColour (major ? juce::Colour::fromRGB (138, 149, 173)
+                                      : juce::Colour::fromRGB (77, 87, 106));
+            graphics.drawVerticalLine (juce::roundToInt (x),
+                                        static_cast<float> (bounds.getY() + (major ? 2 : 7)),
+                                        static_cast<float> (bounds.getY() + 13));
+            graphics.setColour (juce::Colour::fromRGB (190, 198, 214));
+            graphics.setFont (juce::FontOptions (9.5f, major ? juce::Font::bold
+                                                             : juce::Font::plain));
+            const auto labelY = static_cast<float> (bounds.getY() + 12);
+            const auto alignRight = x + 40.0f > timeline.getRight();
+            const auto labelBounds = alignRight
+                ? juce::Rectangle<float> { x - 40.0f, labelY, 40.0f, 14.0f }
+                : juce::Rectangle<float> { x, labelY, 40.0f, 14.0f };
+            graphics.drawText (timelineTimeLabel (second), labelBounds,
+                               alignRight ? juce::Justification::centredRight
+                                          : juce::Justification::centredLeft);
+        }
+
+        graphics.setColour (juce::Colour::fromRGB (72, 80, 99));
+        graphics.drawHorizontalLine (bounds.getBottom() - 1, timeline.getX(), timeline.getRight());
+    }
+
+    void drawTimelineViewControls (juce::Graphics& graphics)
+    {
+        const auto y = loopRulerTop + loopRulerHeight + timeRulerHeight;
+        graphics.setColour (juce::Colour::fromRGB (24, 28, 37));
+        graphics.fillRect (contentLeft, y, getWidth() - contentLeft - 24, timelineScrollBarHeight);
+        graphics.setColour (juce::Colour::fromRGB (151, 160, 180));
+        graphics.setFont (juce::FontOptions (9.0f, juce::Font::bold));
+        graphics.drawText ("VIEW", contentLeft, y, 64, timelineScrollBarHeight,
+                           juce::Justification::centred);
+    }
+
     void drawTimeline (juce::Graphics& graphics)
     {
         const auto tracks = te::getAudioTracks (*edit);
@@ -3305,8 +4206,10 @@ private:
             for (int lane = 0; lane < laneCount; ++lane)
             {
                 const auto y = content.getY() + lane * laneHeight;
-                graphics.setColour (lane % 2 == 0 ? juce::Colour::fromRGB (35, 41, 54)
-                                                   : juce::Colour::fromRGB (31, 37, 49));
+                const auto blackLane = drumIndex < 0
+                    && std::find (blackSemitones.begin(), blackSemitones.end(), lane) != blackSemitones.end();
+                graphics.setColour (blackLane ? juce::Colour::fromRGB (27, 32, 43)
+                                               : juce::Colour::fromRGB (35, 41, 54));
                 graphics.fillRect (content.getX(), y, content.getWidth(), laneHeight);
                 graphics.setColour (juce::Colour::fromRGB (72, 80, 99));
                 graphics.drawHorizontalLine (juce::roundToInt (y), content.getX(), content.getRight());
@@ -3314,40 +4217,63 @@ private:
                 graphics.setFont (juce::FontOptions (juce::jmin (12.0f, laneHeight), juce::Font::bold));
                 const auto label = drumIndex >= 0
                     ? juce::String (drumPresets[static_cast<size_t> (drumIndex)].name)
-                    : pitchLabel (timelinePitchRange (trackIndex).first + lane);
+                    : juce::String (rootNames[static_cast<size_t> (lane)]);
                 graphics.drawText (label, juce::Rectangle<float> { bounds.getX() + 5.0f, y, 54.0f, laneHeight },
                                    juce::Justification::centredRight);
             }
 
-            for (int second = 0; second <= static_cast<int> (timelineLengthSeconds); ++second)
+            graphics.saveState();
+            graphics.reduceClipRegion (content.getSmallestIntegerContainer());
+            const auto firstSecond = juce::jmax (0, static_cast<int> (std::ceil (timelineView.start)));
+            const auto lastSecond = juce::jmin (static_cast<int> (timelineLengthSeconds),
+                                                 static_cast<int> (std::floor (timelineView.start
+                                                                                + timelineView.length)));
+            for (int second = firstSecond; second <= lastSecond; ++second)
             {
-                const auto x = content.getX() + content.getWidth() * second
-                    / static_cast<float> (timelineLengthSeconds);
+                const auto x = timelineXAt (second);
                 graphics.setColour (second % 4 == 0 ? juce::Colour::fromRGB (91, 101, 123)
                                                      : juce::Colour::fromRGB (56, 64, 80));
                 graphics.drawVerticalLine (juce::roundToInt (x), content.getY(), content.getBottom());
-                if (second % 4 == 0)
-                {
-                    graphics.setFont (juce::FontOptions (10.0f));
-                    graphics.setColour (juce::Colour::fromRGB (172, 181, 201));
-                    graphics.drawText (juce::String (second) + "s",
-                                       juce::Rectangle<float> { x + 3.0f, bounds.getY(), 28.0f, 16.0f },
-                                       juce::Justification::centredLeft);
-                }
             }
+
+            const auto loop = loopRange();
+            const auto loopStartX = timelineXAt (loop.start);
+            const auto loopEndX = timelineXAt (loop.end);
+            const auto loopColour = edit->getTransport().looping
+                ? juce::Colour::fromRGB (105, 225, 180)
+                : juce::Colour::fromRGB (112, 123, 145);
+            graphics.setColour (loopColour.withAlpha (edit->getTransport().looping ? 0.10f : 0.04f));
+            graphics.fillRect (loopStartX, content.getY(), loopEndX - loopStartX, content.getHeight());
+            graphics.setColour (loopColour.withAlpha (0.72f));
+            graphics.fillRect (loopStartX - 1.0f, content.getY(), 2.0f, content.getHeight());
+            graphics.fillRect (loopEndX - 1.0f, content.getY(), 2.0f, content.getHeight());
 
             if (auto* clip = findMidiClip (*tracks[trackIndex]))
             {
                 for (auto* midiNote : clip->getSequence().getNotes())
                 {
                     const auto note = toTimelineNote (*midiNote, *clip);
-                    const auto rectangle = noteBounds (note, trackIndex);
+                    const auto rectangle = displayedNoteBounds (*midiNote, *clip, trackIndex);
                     if (rectangle.isEmpty())
                         continue;
 
-                    graphics.setColour (drumIndex >= 0 ? juce::Colour::fromRGB (255, 163, 82)
-                                                       : juce::Colour::fromRGB (105, 225, 180));
+                    const auto noteColour = drumIndex >= 0 ? juce::Colour::fromRGB (255, 163, 82)
+                                                            : octaveColour (note.pitch);
+                    graphics.setColour (noteColour);
                     graphics.fillRoundedRectangle (rectangle, 3.0f);
+
+                    if (drumIndex < 0 && rectangle.getWidth() >= 14.0f && rectangle.getHeight() >= 5.0f)
+                    {
+                        graphics.setColour (juce::Colours::white);
+                        graphics.setFont (juce::FontOptions (juce::jlimit (5.0f, 10.0f,
+                                                                          rectangle.getHeight() - 1.0f),
+                                                             juce::Font::bold));
+                        const auto label = rectangle.getWidth() >= 28.0f
+                            ? compactPitchLabel (note.pitch)
+                            : juce::String (note.pitch / 12 - 1);
+                        graphics.drawText (label, rectangle.reduced (2.0f, 0.0f),
+                                           juce::Justification::centredLeft, true);
+                    }
 
                     if (trackIndex == selectedTrackIndex && midiNote == selectedNote)
                     {
@@ -3359,11 +4285,11 @@ private:
                 }
             }
 
-            const auto playheadX = content.getX() + content.getWidth()
-                * static_cast<float> (currentPosition() / timelineLengthSeconds);
+            const auto playheadX = timelineXAt (currentPosition());
             graphics.setColour (recording ? juce::Colour::fromRGB (255, 76, 76)
                                           : juce::Colour::fromRGB (255, 213, 86));
             graphics.fillRect (playheadX - 1.0f, content.getY(), 2.0f, content.getHeight());
+            graphics.restoreState();
         }
         graphics.restoreState();
     }
@@ -3411,17 +4337,27 @@ private:
     std::unique_ptr<ShortcutEditorWindow> shortcutEditorWindow;
     juce::MenuBarComponent menuBar { this };
     te::MidiClip* midiClip = nullptr;
-    juce::TextButton recordButton { "RECORD" }, playButton { "PLAY" }, stopButton { "STOP" };
-    juce::TextButton deleteButton { "DELETE" }, kickButton { "KICK Z" }, snareButton { "SNARE X" };
-    juce::TextButton closedHatButton { "HAT C" }, openHatButton { "HAT V" };
+    RecordButton recordButton;
+    juce::TextButton playButton { "PLAY" };
+    juce::TextButton loopButton { "LOOP" };
+    juce::TextButton metronomeButton { "METRO" };
+    juce::TextButton deleteButton { "DELETE" };
     juce::TextButton addTrackButton { "+ ADD TRACK" };
     juce::TextButton settingsButton { "AUDIO SETTINGS" };
-    juce::Slider volumeSlider, panSlider;
+    juce::Slider volumeSlider, panSlider, tempoSlider, zoomSlider;
+    juce::ScrollBar timelineScrollBar { false };
     juce::ToggleButton muteButton { "MUTE" }, soloButton { "SOLO" };
     std::array<bool, midiNotes.size()> keyboardNotesDown {};
     std::array<bool, midiNotes.size()> liveNotesDown {};
-    std::array<bool, 5> drumKeysDown {};
+    std::array<bool, 4> drumKeysDown {};
+    std::array<bool, 2> transportShortcutKeysDown {};
     std::array<double, midiNotes.size()> recordingStarts = []
+    {
+        std::array<double, midiNotes.size()> starts {};
+        starts.fill (-1.0);
+        return starts;
+    }();
+    std::array<double, midiNotes.size()> recordingWallClockStarts = []
     {
         std::array<double, midiNotes.size()> starts {};
         starts.fill (-1.0);
@@ -3436,12 +4372,18 @@ private:
     int resizingTrackIndex = -1;
     int resizeStartY = 0;
     int resizeStartHeight = 0;
+    LoopRangeSeconds loopDragOriginal;
+    double loopDragAnchorSeconds = 0.0;
+    LoopDragMode loopDragMode = LoopDragMode::none;
     bool draggingNote = false;
     bool draggingPlayhead = false;
     bool resizingNote = false;
     bool recording = false;
     bool lastUiPlaying = false;
+    double lastUiPosition = 0.0;
     bool updatingTrackControls = false;
+    bool updatingProjectControls = false;
+    TimelineViewRange timelineView;
     std::uint32_t nextAudioCapture = 0;
     float masterOutputPeak = 0.0f;
     int masterProtectionHold = 0;
@@ -3569,6 +4511,10 @@ int runProjectRoundTripTest()
     tracks[1]->state.setProperty (trackHeightProperty, 96, nullptr);
     edit->state.setProperty (scaleRootProperty, 9, nullptr);
     edit->state.setProperty (scaleTypeProperty, 1, nullptr);
+    edit->getTransport().setLoopRange ({
+        tracktion::TimePosition::fromSeconds (2.0),
+        tracktion::TimePosition::fromSeconds (6.0) });
+    edit->getTransport().looping = true;
 
     auto conversionPlugin = edit->getPluginCache().createNewPlugin (te::FourOscPlugin::xmlTypeName, {});
     auto* conversionSynth = dynamic_cast<te::FourOscPlugin*> (conversionPlugin.get());
@@ -3624,11 +4570,16 @@ int runProjectRoundTripTest()
     auto mixerRestored = false;
     auto scaleRestored = false;
     auto trackHeightsRestored = false;
+    auto loopRestored = false;
     if (loaded != nullptr)
     {
         const auto loadedTracks = te::getAudioTracks (*loaded);
         scaleRestored = static_cast<int> (loaded->state.getProperty (scaleRootProperty, -1)) == 9
                      && static_cast<int> (loaded->state.getProperty (scaleTypeProperty, -1)) == 1;
+        const auto loadedLoop = loaded->getTransport().getLoopRange();
+        loopRestored = loaded->getTransport().looping
+                    && std::abs (loadedLoop.getStart().inSeconds() - 2.0) < 0.0001
+                    && std::abs (loadedLoop.getEnd().inSeconds() - 6.0) < 0.0001;
         tracksRestored = loadedTracks.size() == 2
                       && loadedTracks[0]->getName() == "Lead"
                       && loadedTracks[1]->getName() == "Pad";
@@ -3665,7 +4616,36 @@ int runProjectRoundTripTest()
     if (! mixerRestored) return 17;
     if (! scaleRestored) return 21;
     if (! trackHeightsRestored) return 23;
+    if (! loopRestored) return 59;
     return 0;
+}
+
+int runLoopPlaybackTest()
+{
+    const auto shortRange = normaliseLoopRange (15.95, 15.95);
+    const auto reversed = normaliseLoopRange (7.0, 3.0);
+    const auto moved = moveLoopRange ({ 3.0, 7.0 }, 20.0);
+    if (std::abs (shortRange.end - shortRange.start - minimumLoopLengthSeconds) > 0.0001
+        || std::abs (reversed.start - 3.0) > 0.0001
+        || std::abs (reversed.end - 7.0) > 0.0001
+        || std::abs (moved.start - 12.0) > 0.0001
+        || std::abs (moved.end - 16.0) > 0.0001)
+        return 60;
+
+    te::Engine engine { "MusicBitMakerLoopPlaybackTest" };
+    auto edit = te::createEmptyEdit (engine, {});
+    edit->getTransport().setLoopRange ({
+        tracktion::TimePosition::fromSeconds (1.5),
+        tracktion::TimePosition::fromSeconds (5.5) });
+    edit->getTransport().looping = true;
+    edit->flushState();
+    const auto savedState = edit->state.createCopy();
+    edit.reset();
+    auto loaded = te::loadEditFromState (engine, savedState, te::Edit::forEditing);
+    const auto range = loaded->getTransport().getLoopRange();
+    return loaded->getTransport().looping
+        && std::abs (range.getStart().inSeconds() - 1.5) < 0.0001
+        && std::abs (range.getEnd().inSeconds() - 5.5) < 0.0001 ? 0 : 61;
 }
 
 int renderSynthDemos()
@@ -3739,6 +4719,8 @@ int runShortcutMapTest()
     if (! defaults.isValid() || defaults.actionForKey ('A') != 12
         || defaults.actionForKey ('Z') != static_cast<int> (ShortcutMap::drumBase)
         || defaults.actionForKey ('N') != static_cast<int> (ShortcutMap::octaveDown)
+        || defaults.actionForKey (juce::KeyPress::spaceKey) != static_cast<int> (ShortcutMap::playStop)
+        || defaults.keys[ShortcutMap::loop] != 0
         || std::any_of (defaults.keys.begin(), defaults.keys.begin() + 12,
                         [] (int key) { return key != 0; }))
         return 54;
@@ -3755,6 +4737,19 @@ int runShortcutMapTest()
         != defaults.keys)
         return 57;
 
+    juce::StringArray legacyValues;
+    for (size_t index = 0; index < ShortcutMap::drumBase + 4; ++index)
+        legacyValues.add (juce::String (defaults.keys[index]));
+    legacyValues.add (juce::String (juce::KeyPress::spaceKey));
+    legacyValues.add (juce::String ('N'));
+    legacyValues.add (juce::String ('M'));
+    const auto migrated = parseLegacyShortcutMap (legacyValues.joinIntoString (","));
+    if (migrated.actionForKey (juce::KeyPress::spaceKey) != static_cast<int> (ShortcutMap::playStop)
+        || migrated.keys[ShortcutMap::octaveDown] != 'N'
+        || migrated.keys[ShortcutMap::octaveUp] != 'M'
+        || migrated.keys[ShortcutMap::loop] != 0)
+        return 85;
+
     auto profiles = defaultShortcutProfiles();
     profiles[shortcutProfileIndex (0, 0)].keys[0] = 'Q';
     profiles[shortcutProfileIndex (9, 1)].keys[0] = 'R';
@@ -3769,12 +4764,46 @@ int runShortcutMapTest()
     return 0;
 }
 
+int runCompactPianoRollTest()
+{
+    if (pianoRollLaneForPitch (48) != 0 || pianoRollLaneForPitch (60) != 0
+        || pianoRollLaneForPitch (72) != 0 || pianoRollLaneForPitch (66) != 6)
+        return 63;
+    if (pitchOnPianoRollLane (60, 2) != 62 || pitchOnPianoRollLane (48, 11) != 59
+        || compactPitchLabel (48) != "C3" || compactPitchLabel (60) != "C4"
+        || compactPitchLabel (72) != "C5")
+        return 64;
+    if (! canMovePitchByOctave (60, 1) || ! canMovePitchByOctave (60, -1)
+        || canMovePitchByOctave (120, 1) || canMovePitchByOctave (7, -1))
+        return 65;
+    return octaveColour (48) != octaveColour (60) && octaveColour (60) != octaveColour (72) ? 0 : 66;
+}
+
+int runRecordModeTest()
+{
+    const auto stoppedEnd = recordedNoteEnd (5.0, 5.0, 0.4);
+    const auto quickEnd = recordedNoteEnd (5.0, 5.0, 0.0);
+    const auto playingEnd = recordedNoteEnd (5.0, 6.25, 0.2);
+    const auto boundaryStart = recordedNoteStart (timelineLengthSeconds);
+    const auto boundaryEnd = recordedNoteEnd (boundaryStart, boundaryStart, 1.0);
+    if (std::abs (stoppedEnd - 5.4) > 0.0001
+        || std::abs (quickEnd - 5.05) > 0.0001
+        || std::abs (playingEnd - 6.25) > 0.0001
+        || ! didLoopPlaybackWrap (true, true, true, 5.49, 1.51)
+        || didLoopPlaybackWrap (true, true, false, 5.49, 1.51)
+        || didLoopPlaybackWrap (true, false, true, 5.49, 0.0))
+        return 67;
+    return std::abs (boundaryStart - 15.95) < 0.0001
+        && std::abs (boundaryEnd - 16.0) < 0.0001 ? 0 : 68;
+}
+
 int runKeyboardOctaveTest()
 {
     auto shortcuts = ShortcutMap::defaults();
     int octave = 3;
     std::vector<int> events;
     bool expanded = false, sawWaveformChange = false, sawSliderChange = false;
+    int sharedShortcut = 0;
     SynthControls liveControls;
     KeyboardPadComponent pad (
         shortcuts,
@@ -3787,7 +4816,16 @@ int runKeyboardOctaveTest()
             sawWaveformChange = sawWaveformChange || waveformChanged;
             sawSliderChange = sawSliderChange || ! waveformChanged;
         },
+        [&] (int keyCode)
+        {
+            if (keyCode != juce::KeyPress::spaceKey)
+                return false;
+            sharedShortcut = keyCode;
+            return true;
+        },
         [&] (bool value) { expanded = value; });
+    pad.keyPressed (juce::KeyPress (juce::KeyPress::spaceKey));
+    if (sharedShortcut != juce::KeyPress::spaceKey) return 37;
     pad.keyPressed (juce::KeyPress ('A', {}, 'a'));
     pad.keyPressed (juce::KeyPress ('N', {}, 'n'));
     if (octave != 2 || events != std::vector<int> { 60, -60 }) return 27;
@@ -3837,7 +4875,7 @@ int runKeyboardOctaveTest()
 int runEmptyProjectTest()
 {
     te::Engine engine { "MusicBitMakerEmptyProjectTest" };
-    const auto projectFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
+    const auto projectFile = juce::File::getCurrentWorkingDirectory()
         .getNonexistentChildFile ("MusicBitMakerEmptyProjectTest", ".tracktionedit", false);
     auto edit = te::createEmptyEdit (engine, projectFile);
     clearAllTracks (*edit);
@@ -3846,16 +4884,17 @@ int runEmptyProjectTest()
     edit.reset();
     auto loaded = saved ? te::loadEditFromFile (engine, projectFile, te::Edit::forEditing) : nullptr;
     const auto missingDirectory = projectFile.getSiblingFile ("MissingDirectoryForFallback");
-    const auto passed = loaded != nullptr
-                     && static_cast<int> (loaded->state.getProperty (octaveProperty, -1)) == 2
-                     && te::getAudioTracks (*loaded).isEmpty()
-                     && projectDirectoryFor (projectFile.getParentDirectory().getFullPathName())
-                            == projectFile.getParentDirectory()
-                     && projectDirectoryFor (missingDirectory.getFullPathName())
-                            == juce::File::getSpecialLocation (juce::File::userDocumentsDirectory);
+    const auto failure = ! saved ? 72
+        : loaded == nullptr ? 73
+        : static_cast<int> (loaded->state.getProperty (octaveProperty, -1)) != 2 ? 74
+        : ! te::getAudioTracks (*loaded).isEmpty() ? 75
+        : projectDirectoryFor (projectFile.getParentDirectory().getFullPathName())
+            != projectFile.getParentDirectory() ? 76
+        : projectDirectoryFor (missingDirectory.getFullPathName())
+            != juce::File::getSpecialLocation (juce::File::userDocumentsDirectory) ? 77 : 0;
     loaded.reset();
     projectFile.deleteFile();
-    return passed ? 0 : 26;
+    return failure;
 }
 
 int runInstrumentLogTest()
@@ -4009,8 +5048,69 @@ int runMasterSafetyTest()
         && std::abs (meteredPeak - peak) < 0.0001f ? 0 : 53;
 }
 
+int runTimelineToolsTest()
+{
+    const auto view = normaliseTimelineView (20.0, 4.0);
+    const auto clamped = normaliseTimelineView (-3.0, 100.0);
+    const juce::Rectangle<float> content { 100.0f, 0.0f, 100.0f, 20.0f };
+    const juce::Rectangle<float> partlyVisibleItem { 80.0f, 0.0f, 60.0f, 20.0f };
+    if (std::abs (view.start - 12.0) > 0.0001 || std::abs (view.length - 4.0) > 0.0001
+        || std::abs (clamped.start) > 0.0001
+        || std::abs (clamped.length - timelineLengthSeconds) > 0.0001
+        || std::abs (timelineTimeForProportion ({ 4.0, 8.0 }, 0.5) - 8.0) > 0.0001
+        || std::abs (timelineProportionForTime ({ 4.0, 8.0 }, 8.0) - 0.5) > 0.0001
+        || timelineItemContainsPoint (content, partlyVisibleItem, { 90.0f, 10.0f })
+        || ! timelineItemContainsPoint (content, partlyVisibleItem, { 110.0f, 10.0f }))
+        return 70;
+
+    te::Engine engine { "MusicBitMakerTimelineToolsTest" };
+    auto edit = te::createEmptyEdit (engine, {});
+    edit->clickTrackEnabled = true;
+    edit->clickTrackRecordingOnly = false;
+    edit->clickTrackEmphasiseBars = true;
+    edit->tempoSequence.getTempo (0)->setBpm (96.0);
+    return edit->clickTrackEnabled.get() && ! edit->clickTrackRecordingOnly.get()
+        && edit->clickTrackEmphasiseBars.get()
+        && std::abs (edit->tempoSequence.getTempo (0)->getBpm() - 96.0) < 0.0001 ? 0 : 71;
+}
+
+int runUiCaptureTest()
+{
+    class TestComponent final : public juce::Component
+    {
+        void paint (juce::Graphics& graphics) override
+        {
+            graphics.fillAll (juce::Colour::fromRGB (20, 23, 31));
+            graphics.setColour (juce::Colour::fromRGB (72, 180, 255));
+            graphics.fillRect (8, 8, 24, 16);
+        }
+    } component;
+
+    component.setSize (64, 48);
+    const auto output = juce::File::getCurrentWorkingDirectory()
+        .getNonexistentChildFile ("MusicBitMakerUiCaptureTest", ".png", false);
+    const auto capture = captureComponentToPng (component, output);
+    const auto decoded = juce::ImageFileFormat::loadFrom (output);
+    const auto passed = capture.ok && capture.width == 64 && capture.height == 48
+                     && capture.bytes > 0 && decoded.isValid()
+                     && decoded.getWidth() == 64 && decoded.getHeight() == 48;
+    output.deleteFile();
+    return passed ? 0 : 93;
+}
+
 int runSelfTest()
 {
+    if (timelineTimeLabel (0) != "0:00" || timelineTimeLabel (9) != "0:09"
+        || timelineTimeLabel (60) != "1:00" || timelineTimeLabel (125) != "2:05")
+        return 69;
+    if (const auto timelineTools = runTimelineToolsTest(); timelineTools != 0)
+        return timelineTools;
+    if (const auto loopPlayback = runLoopPlaybackTest(); loopPlayback != 0)
+        return loopPlayback;
+    if (const auto compactPianoRoll = runCompactPianoRollTest(); compactPianoRoll != 0)
+        return compactPianoRoll;
+    if (const auto recordMode = runRecordModeTest(); recordMode != 0)
+        return recordMode;
     if (const auto shortcuts = runShortcutMapTest(); shortcuts != 0)
         return shortcuts;
     if (const auto octaveTest = runKeyboardOctaveTest(); octaveTest != 0)
@@ -4054,12 +5154,32 @@ public:
     const juce::String getApplicationVersion() override { return JUCE_APPLICATION_VERSION_STRING; }
     bool moreThanOneInstanceAllowed() override
     {
-        return getCommandLineParameters().contains ("--self-test")
+        return getCommandLineParameters().contains ("--live")
+            || getCommandLineParameters().contains ("--headless")
+            || getCommandLineParameters().contains ("--self-test")
             || getCommandLineParameters().contains ("--render-synth-demos");
     }
 
     void initialise (const juce::String& commandLine) override
     {
+        if (commandLine.contains ("--live"))
+        {
+            setApplicationReturnValue (musicbitmaker::runLiveControlClient (
+                getCommandLineParameterArray()));
+            quit();
+            return;
+        }
+        if (commandLine.contains ("--headless"))
+        {
+            te::Engine headlessEngine { getApplicationName() + " Headless", nullptr,
+                                        musicbitmaker::createHeadlessEngineBehaviour() };
+            headlessEngine.getPluginManager().createBuiltInType<MasterSafetyPlugin>();
+            headlessEngine.getPluginManager().createBuiltInType<DiagnosticAudioTap>();
+            setApplicationReturnValue (musicbitmaker::runHeadlessAutomation (
+                headlessEngine, getCommandLineParameterArray()));
+            quit();
+            return;
+        }
         if (commandLine.contains ("--render-synth-demos"))
         {
             setApplicationReturnValue (renderSynthDemos());
@@ -4069,6 +5189,30 @@ public:
         if (commandLine.contains ("--self-test-keyboard-octave"))
         {
             setApplicationReturnValue (runKeyboardOctaveTest());
+            quit();
+            return;
+        }
+        if (commandLine.contains ("--self-test-loop-playback"))
+        {
+            setApplicationReturnValue (runLoopPlaybackTest());
+            quit();
+            return;
+        }
+        if (commandLine.contains ("--self-test-compact-piano-roll"))
+        {
+            setApplicationReturnValue (runCompactPianoRollTest());
+            quit();
+            return;
+        }
+        if (commandLine.contains ("--self-test-record-mode"))
+        {
+            setApplicationReturnValue (runRecordModeTest());
+            quit();
+            return;
+        }
+        if (commandLine.contains ("--self-test-timeline-tools"))
+        {
+            setApplicationReturnValue (runTimelineToolsTest());
             quit();
             return;
         }
@@ -4102,6 +5246,19 @@ public:
             quit();
             return;
         }
+        if (commandLine.contains ("--self-test-automation-cli"))
+        {
+            setApplicationReturnValue (musicbitmaker::runAutomationCliSelfTest());
+            quit();
+            return;
+        }
+        if (commandLine.contains ("--self-test-live-control"))
+        {
+            const auto liveResult = musicbitmaker::runLiveControlSelfTest();
+            setApplicationReturnValue (liveResult != 0 ? liveResult : runUiCaptureTest());
+            quit();
+            return;
+        }
         if (commandLine.contains ("--self-test-empty-project"))
         {
             setApplicationReturnValue (runEmptyProjectTest());
@@ -4118,10 +5275,18 @@ public:
         engine->getPluginManager().createBuiltInType<MasterSafetyPlugin>();
         engine->getPluginManager().createBuiltInType<DiagnosticAudioTap>();
         mainWindow = std::make_unique<MainWindow> (getApplicationName() + " " + getApplicationVersion(), *engine);
+        liveControl = std::make_unique<musicbitmaker::LiveControlServer> (
+            [this] (const juce::String& command, const juce::var& arguments)
+            {
+                return mainWindow->getMainComponent().handleLiveCommand (command, arguments);
+            });
+        if (! liveControl->start())
+            liveControl.reset();
     }
 
     void shutdown() override
     {
+        liveControl.reset();
         mainWindow.reset();
         engine.reset();
     }
@@ -4158,10 +5323,16 @@ private:
         {
             juce::JUCEApplication::getInstance()->systemRequestedQuit();
         }
+
+        MainComponent& getMainComponent() const
+        {
+            return *static_cast<MainComponent*> (getContentComponent());
+        }
     };
 
     std::unique_ptr<te::Engine> engine;
     std::unique_ptr<MainWindow> mainWindow;
+    std::unique_ptr<musicbitmaker::LiveControlServer> liveControl;
 };
 }
 

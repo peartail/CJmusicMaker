@@ -32,7 +32,10 @@ if (MSVC)
     target_compile_options(MusicBitMaker PRIVATE "$<$<CONFIG:Debug>:/Z7>")
 endif()
 
-target_sources(MusicBitMaker PRIVATE src/Main.cpp)
+target_sources(MusicBitMaker PRIVATE
+    src/Main.cpp
+    src/AutomationCli.cpp
+    src/LiveControl.cpp)
 target_compile_features(MusicBitMaker PRIVATE cxx_std_20)
 
 target_compile_definitions(MusicBitMaker PRIVATE

@@ -172,8 +172,9 @@ Tracktion Engine의 `Edit`를 프로젝트 상태의 기준으로 삼는다. UI 
 - [x] 노트 선택, 시간·음높이 이동, 길이 변경, 삭제
 - [x] Tracktion `.tracktionedit` 프로젝트 저장과 불러오기
 - [x] File 메뉴에서 새 프로젝트, 저장, 다른 이름으로 저장, 불러오기
-- [ ] 확대·축소, 스크롤
-- 템포와 그리드 스냅
+- [x] 가로 확대·축소와 수평 스크롤
+- [x] BPM과 재생 중 메트로놈
+- 그리드 스냅
 
 ### 3. 다중 트랙과 레이어 녹음
 
@@ -195,7 +196,7 @@ VST3 호스팅, ASIO, 복잡한 자동화, 고급 마스터링은 위 기본 흐
 
 ## 건반 옥타브
 
-건반 창은 3옥타브(36음)를 표시하며 마우스로 모든 음을 연주하고 녹음할 수 있다. 시작 옥타브는 맨 왼쪽의 `Octave` 드롭다운에서 0~6으로 선택한다. 기본값 4의 화면 범위는 C4~B6이며, `Z`/`X`는 화면 전체를 한 옥타브씩 이동한다. 이전 프로젝트에 저장된 시작 옥타브 7~8은 열 때 6으로 맞춘다. 컴퓨터 키 A~K는 화면 왼쪽의 첫 13음에 연결된다. 건반의 음 이름, 실제 연주와 녹음 음높이가 함께 바뀐다. 옥타브를 바꾸면 누르고 있던 음은 먼저 종료되며, 선택한 옥타브는 프로젝트에 저장된다. 타임라인은 현재 화면 건반 범위와 기존 녹음 노트를 포함해 표시한다.
+건반 창은 3옥타브(36음)를 표시하며 마우스로 모든 음을 연주하고 녹음할 수 있다. 시작 옥타브는 맨 왼쪽의 `Octave` 드롭다운에서 0~6으로 선택한다. 기본값 4의 화면 범위는 C4~B6이며, 기본 `N`/`M`은 화면 전체를 한 옥타브씩 이동한다. 이전 프로젝트에 저장된 시작 옥타브 7~8은 열 때 6으로 맞춘다. 컴퓨터 키 `A/W/S/E/D/F/T/G/Y/H/U/J`는 기본 배치에서 가운데 옥타브에 연결된다. 건반의 음 이름, 실제 연주와 녹음 음높이가 함께 바뀐다. 옥타브를 바꾸면 누르고 있던 음은 먼저 종료되며, 선택한 옥타브는 프로젝트에 저장된다. 타임라인은 연주 범위와 독립적으로 C~B의 12개 행만 표시한다.
 
 옥타브 UI·단축키 테스트: `.\build\MusicBitMaker_artefacts\Debug\MusicBitMaker.exe --self-test-keyboard-octave`
 
@@ -221,6 +222,28 @@ v0.1024는 `Edit > Shortcuts...`에 Root와 Scale 선택기를 추가한다. 피
 
 v0.1025는 건반 창의 `SOUND CONTROLS +`를 누르면 아래에 파형, Attack/Release, Filter Cutoff/Resonance, Reverb Mix 패널을 펼친다. 별도 Apply 없이 값을 바꾸는 즉시 선택한 신시사이저 트랙의 FourOsc에 반영된다. 트랙 우클릭의 `Settings > Sound Controls`도 같은 패널을 열며, 드럼 트랙에서는 사용할 수 없다.
 
+v0.1026은 상단 `LOOP` 버튼과 모든 트랙에 공통인 `LOOP RANGE` 룰러를 추가한다. 룰러의 빈 곳을 드래그하면 새 반복 구간을 만들고, 양끝을 드래그하면 시작·끝을 조절하며, 가운데를 드래그하면 길이를 유지한 채 구간을 이동한다. 범위와 활성 상태는 Tracktion Transport에 저장되어 프로젝트 저장·불러오기에 유지된다. 설계 비교는 `docs/loop-playback-design.md`, 독립 검사는 `MusicBitMaker.exe --self-test-loop-playback`을 참고한다.
+
+v0.1027은 신시사이저 타임라인을 36개 음높이 행 대신 C~B의 12개 행으로 접어 표시한다. C3·C4·C5처럼 음 이름이 같은 노트는 같은 행 안에서 나누어 보이며, 고정된 옥타브 색과 `C3` 같은 라벨로 실제 음높이를 구분한다. 세로 드래그는 기존 옥타브를 유지하고, 노트 우클릭의 `Octave Up/Down`은 음높이를 12씩 이동한다. Tracktion MIDI 번호와 건반 창의 3옥타브 연주 범위는 변경하지 않는다. 설계는 `docs/compact-piano-roll-plan.md`, 독립 검사는 `MusicBitMaker.exe --self-test-compact-piano-roll`을 참고한다.
+
+v0.1028은 RECORD를 재생 명령이 아닌 `RECORD MODE` 녹음 대기 토글로 분리한다. 모드를 켠 뒤 PLAY를 누르면 기존처럼 재생 헤드 진행에 맞춰 실시간 녹음한다. 재생이 멈춘 상태에서는 타임라인에서 재생 헤드를 원하는 위치로 옮긴 뒤 건반을 누르면 그 위치에 노트가 추가되며, 누르고 있던 실제 시간이 노트 길이가 된다. 드럼은 정지 상태에서도 프리셋의 고정 길이로 추가된다. STOP은 재생만 멈추고 녹음 모드는 유지한다. 독립 검사는 `MusicBitMaker.exe --self-test-record-mode`를 사용한다.
+
+v0.1029는 녹음 모드 버튼을 빨간 원 표시가 있는 `REC` 버튼으로 단순화한다. 녹음 모드와 LOOP를 동시에 켤 수 있으며, 건반을 누른 채 루프 끝을 통과하면 노트를 루프 끝과 시작에서 나눠 기록해 다음 반복에서도 편집 가능한 노트로 남긴다.
+
+v0.1030은 루프 영역 아래에 모든 트랙이 공유하는 `TIME` 눈금자를 추가한다. 매초 `분:초` 형식으로 시간을 표시하고, 눈금자를 클릭하거나 좌우로 드래그하면 재생 헤드를 해당 시각으로 이동한다. 트랙 안에는 같은 위치의 세로 시간 격자만 남겨 눈금자와 노트 위치를 쉽게 맞춘다. 후속 가로 확대·축소와 메트로놈 순서는 `docs/timeline-scale-metronome-plan.md`에 정리했다.
+
+v0.1031은 `TIME ZOOM`으로 타임라인을 1배~8배까지 확대하고, 시간 눈금 아래 `VIEW` 막대로 보이는 구간을 좌우 이동한다. 확대는 화면 좌표만 바꾸므로 Tracktion에 저장된 노트 시간은 유지되며, 확대된 상태에서도 노트 이동·길이 조절, 루프 범위, 재생 헤드가 같은 시간에 정렬된다. 왼쪽 `METRO`를 켜면 PLAY 중 Tracktion Click Track이 박자마다 클릭음을 내며, 옆의 BPM으로 분당 박자 수를 40~240 사이에서 조절한다. 메트로놈과 BPM은 프로젝트에 저장된다. 독립 검사는 `MusicBitMaker.exe --self-test-timeline-tools`를 사용한다.
+
+v0.1032는 창과 오디오 장치를 열지 않는 조회 전용 헤드리스 CLI를 추가한다. `version`, `project-info`, `list-tracks`, `list-notes` 명령을 지원하며 결과는 필수 `--result-json` 경로에 JSON으로 기록한다. 예: `MusicBitMaker.exe --headless list-tracks --project "E:\Songs\demo.tracktionedit" --result-json "E:\Songs\tracks.json"`. `list-notes`에는 먼저 `list-tracks`로 얻은 `--track-id`가 필요하다. 설계와 종료 코드는 `docs/cli-headless-automation-design.md`, 독립 검사는 `MusicBitMaker.exe --self-test-automation-cli`를 참고한다.
+
+v0.1033은 실행 중인 GUI 앱의 현재 상태를 읽는 로컬 `--live` CLI를 추가한다. `ping`, `status`, `list-tracks`, `list-notes`를 지원하며 Windows Named Pipe로 GUI 프로세스에 요청을 보낸다. 예: `MusicBitMaker.exe --live status --result-json "E:\Songs\live-status.json"`. 실행 중인 앱이 없으면 종료 코드 7과 `app_not_running`을 반환한다. 현재 단계는 조회 전용이며 화면 캡처와 재생·편집 명령은 후속 버전 범위다. 설계는 `docs/live-app-control-design.md`, 독립 검사는 `MusicBitMaker.exe --self-test-live-control`을 참고한다.
+
+v0.1034는 실행 중인 앱의 현재 메인 UI를 PNG로 저장하는 `capture-ui` 명령을 추가한다. 예: `MusicBitMaker.exe --live capture-ui --output "E:\Songs\music-ui.png" --result-json "E:\Songs\music-ui.json"`. PNG에는 현재 트랙, 노트, 선택, 확대 구간, 루프와 재생 헤드가 포함되며 Windows 제목 표시줄·다른 앱·분리된 Keyboard Pad 창은 포함되지 않는다. 결과 JSON에는 PNG 경로, 크기와 파일 바이트 수가 기록된다. 독립 검사는 기존 `--self-test-live-control`에 포함된다.
+
+v0.1035는 `TIME ZOOM` 확대 및 `VIEW` 이동 시 화면 밖 시간의 노트, 루프 영역과 재생 헤드가 트랙의 음계 라벨이나 외부 UI까지 그려지던 문제를 수정한다. 각 트랙의 시간 기반 그래픽은 실제 타임라인 콘텐츠 영역 안에서만 표시되고, 화면 밖 노트는 라벨 영역에서 선택되지 않는다. 경계 검사는 `MusicBitMaker.exe --self-test-timeline-tools`에 포함된다.
+
+v0.1036은 상단의 별도 PLAY/STOP 버튼을 하나의 토글 버튼으로 합쳤다. 재생 중에는 버튼이 `STOP`으로 바뀌며, 기본 `Space`로 같은 Play/Stop 토글을 실행한다. `Edit > Shortcuts...`에서 Play/Stop과 Loop를 공통 단축키로 지정할 수 있고, Loop는 기본 미지정이다. 상단의 Kick/Snare/Closed Hat/Open Hat 버튼은 제거했지만 드럼 키 `Z/X/C/V`는 그대로 동작한다. 기존 `Space = Kick 보조키` 설정은 처음 실행할 때 Play/Stop으로 자동 이전된다.
+
 ## 실시간 오디오 규칙
 
 - 오디오 콜백에서 파일 입출력, 동적 메모리 할당, UI 호출, 긴 잠금, 로그 출력을 하지 않는다.
@@ -233,7 +256,7 @@ v0.1025는 건반 창의 `SOUND CONTROLS +`를 누르면 아래에 파형, Attac
 
 `CMakeLists.txt`와 `src/Main.cpp`가 네이티브 앱의 시작점이다. `Program.cs`와 `MusicBitMaker.csproj`는 이전 WinForms 검증용 프로토타입이며 네이티브 건반 동작을 확인할 때까지 참고용으로 보존한다.
 
-Tracktion Engine은 `external/tracktion_engine` Git 서브모듈에 `v3.2.0`으로 고정했다. 현재 네이티브 앱은 JUCE 창, Tracktion 생성 악기, 다중 트랙, 레이어 녹음, 트랙별 믹서, MIDI 클립 녹음, 재생·정지, 재생 헤드, 노트 편집·삭제, 프로젝트 저장·불러오기를 제공한다. 모든 트랙은 왼쪽 트랙명과 오른쪽 타임라인으로 한 화면에 쌓이며, 신시사이저는 음계 레인으로 크게, 드럼은 단일 레인으로 작게 표시된다. 트랙 사이 경계선을 위아래로 드래그하면 높이가 조절되고 프로젝트에 저장된다.
+Tracktion Engine은 `external/tracktion_engine` Git 서브모듈에 `v3.2.0`으로 고정했다. 현재 네이티브 앱은 JUCE 창, Tracktion 생성 악기, 다중 트랙, 레이어 녹음, 트랙별 믹서, MIDI 클립 녹음, 재생·정지, 반복 재생, 재생 헤드, 노트 편집·삭제, 프로젝트 저장·불러오기를 제공한다. 모든 트랙은 왼쪽 트랙명과 오른쪽 타임라인으로 한 화면에 쌓이며, 신시사이저는 음계 레인으로 크게, 드럼은 단일 레인으로 작게 표시된다. 트랙 사이 경계선을 위아래로 드래그하면 높이가 조절되고 프로젝트에 저장된다.
 
 `+ ADD TRACK`은 신시사이저와 드럼 악기를 선택한 뒤 트랙을 추가한다. 트랙을 마우스 오른쪽 버튼으로 누르면 이름 변경, 악기 변경, 삭제 메뉴가 열린다. 신시사이저와 드럼 사이에서 종류를 바꾸면 확인 후 해당 트랙의 MIDI 데이터가 초기화되며, 신시사이저 프리셋 변경과 드럼 종류 변경은 기존 패턴을 유지한다.
 
